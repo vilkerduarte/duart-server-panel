@@ -1,0 +1,28 @@
+module.exports = {
+  dashboard: {
+    title: "Dashboard",
+    cpu: "CPU",
+    memory: "Memória",
+    disk: "Disco",
+    uptime: "Uptime",
+    systemInfo: "Informações do Sistema",
+    hostname: "Hostname",
+    kernel: "Kernel",
+    distro: "Distribuição",
+    arch: "Arquitetura",
+    topProcesses: "Principais Processos",
+    services: "Serviços",
+    online: "Online",
+    offline: "Offline",
+    errorLoading: "Erro ao carregar estatísticas",
+    loadAverage: "Load Average",
+    used: "Usado",
+    free: "Livre",
+    total: "Total",
+    process: "Processo",
+    cpuUsage: "Uso de CPU",
+    memoryUsage: "Uso de Memória",
+    diskUsage: "Uso de Disco",
+    networkThroughput: "Throughput de Rede",
+  }
+};
