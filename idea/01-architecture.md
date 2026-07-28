@@ -141,14 +141,22 @@ async function executeCommand(
 | `cpu_info` | `cat /proc/stat` | Info CPU |
 | `mem_info` | `cat /proc/meminfo` | Info memória |
 | `disk_info` | `df -h --output=...` | Info disco |
+| `network_info` | `cat /proc/net/dev` | Info rede |
+| `connections` | `ss -s` | Conexões ativas |
 | `process_list` | `ps aux --sort=-%cpu` | Lista processos |
 | `kill_process` | `kill -9 <pid>` | Matar processo |
 | `nginx_reload` | `nginx -t && nginx -s reload` | Recarregar NGINX |
+| `nginx_status` | `curl http://127.0.0.1:8081/nginx_status` | Métricas NGINX |
 | `ufw_status` | `ufw status verbose` | Status firewall |
 | `ufw_allow` | `ufw allow <port>` | Liberar porta |
 | `docker_ps` | `docker ps -a --format json` | Listar containers |
 | `systemctl` | `systemctl <action> <svc>` | Gerenciar serviços |
 | `hostnamectl` | `hostnamectl set-hostname` | Alterar hostname |
+| `certbot` | `certbot certonly` | Emitir certificado SSL |
+| `certbot_renew` | `certbot renew` | Renovar certificados |
+| `crontab` | `crontab -l` | Listar/editar cron |
+| `journalctl` | `journalctl` | Logs do sistema |
+| `tar` | `tar -czf` / `tar -xzf` | Backup/restore |
 
 ## 3. Fluxo de Autenticação
 
@@ -192,22 +200,37 @@ async function executeCommand(
 ### 4.1 Hierarquia de Arquivos de Dados
 
 ```
-data/
+/var/lib/duart-panel/          # Dados persistentes (link simbólico: data/ → aqui)
 ├── auth/
-│   ├── users.json          # Usuários do painel
-│   └── .secret             # Chave JWT (permissão 600)
+│   ├── users.json             # Usuários do painel
+│   └── .secret                # Chave JWT (permissão 600)
 ├── cpu-history/
-│   ├── 2026-07-28.txt      # CPU por dia (1 arquivo/dia)
-│   ├── 2026-07-29.txt
+│   ├── 2026-07-28.txt         # CPU por dia (1 arquivo/dia)
 │   └── ...
+├── network-history/
+│   └── 2026-07-28.txt         # Throughput de rede por dia
 ├── nginx/
-│   └── sites.json          # Config. de sites gerenciados
+│   └── sites.json             # Config. de sites gerenciados
+├── ssl/
+│   └── certificates.json      # Registro de certificados SSL
+├── cron/
+│   ├── custom.json            # Cron jobs do usuário
+│   └── managed.json           # Cron jobs gerenciados pelo painel
+├── backups/                   # Arquivos de backup (.tar.gz)
 ├── settings/
-│   └── config.json         # Configurações do painel
+│   └── config.json            # Configurações do painel
 ├── firewall/
-│   └── custom-rules.json   # Regras customizadas UFW
+│   └── custom-rules.json      # Regras customizadas UFW
 └── logs/
-    └── panel.log           # Log do painel
+    ├── panel.log              # Log do painel
+    ├── ssl-renewal.log        # Log de renovação SSL
+    └── recovery.log           # Log do modo de recuperação
+
+/etc/ssl/duart-panel/          # Certificados SSL gerenciados
+└── certs/
+    └── {domain}/
+        ├── fullchain.pem
+        └── privkey.pem
 ```
 
 ### 4.2 Configurações (`data/settings/config.json`)
@@ -222,11 +245,17 @@ data/
   "theme": "dark",
   "port": 0,
   "domain": "",
+  "nginxStubStatus": true,
+  "sslAutoRenew": true,
+  "sslRenewDaysBefore": 5,
+  "backupRetentionCount": 10,
   "installedModules": {
     "mysql": false,
     "postgresql": false,
     "mongodb": false,
-    "docker": false
+    "docker": false,
+    "fail2ban": false,
+    "certbot": false
   }
 }
 ```

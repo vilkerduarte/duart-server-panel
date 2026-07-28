@@ -184,18 +184,31 @@ choose_port() {
 create_dirs() {
     log_info "Criando estrutura de diretórios..."
     
-    mkdir -p data/auth
-    mkdir -p data/cpu-history
-    mkdir -p data/nginx
-    mkdir -p data/settings
-    mkdir -p data/firewall
-    mkdir -p data/logs
+    # Diretório de dados persistentes (segregado do projeto)
+    local DATA_HOME="/var/lib/duart-panel"
+    mkdir -p "$DATA_HOME"
+    
+    mkdir -p "$DATA_HOME/auth"
+    mkdir -p "$DATA_HOME/cpu-history"
+    mkdir -p "$DATA_HOME/network-history"
+    mkdir -p "$DATA_HOME/nginx"
+    mkdir -p "$DATA_HOME/ssl"
+    mkdir -p "$DATA_HOME/cron"
+    mkdir -p "$DATA_HOME/backups"
+    mkdir -p "$DATA_HOME/settings"
+    mkdir -p "$DATA_HOME/firewall"
+    mkdir -p "$DATA_HOME/logs"
+    mkdir -p /etc/ssl/duart-panel/certs
+    
+    # Link simbólico: data/ → /var/lib/duart-panel/
+    ln -sf "$DATA_HOME" "$(pwd)/data"
     
     # Permissões restritas
-    chmod 750 data/auth
-    chmod 750 data/settings
+    chmod 750 "$DATA_HOME/auth"
+    chmod 750 "$DATA_HOME/settings"
+    chmod 640 "$DATA_HOME/logs"/*.log 2>/dev/null || true
     
-    log_ok "Diretórios criados"
+    log_ok "Diretórios criados em $DATA_HOME (link: data/)"
 }
 
 # --- Instalar dependências e build ---
@@ -320,6 +333,99 @@ EOF
     log_ok "API iniciada via PM2 na porta $PORT"
 }
 
+# --- Configurar NGINX stub_status (métricas) ---
+setup_nginx_stub_status() {
+    log_info "Configurando NGINX stub_status para métricas..."
+    
+    cat > /etc/nginx/sites-available/nginx-status.conf << 'EOF'
+# NGINX Status (interno, apenas localhost)
+server {
+    listen 127.0.0.1:8081;
+    server_name localhost;
+    location /nginx_status {
+        stub_status;
+        allow 127.0.0.1;
+        deny all;
+    }
+}
+EOF
+    
+    ln -sf /etc/nginx/sites-available/nginx-status.conf /etc/nginx/sites-enabled/nginx-status.conf
+    
+    if nginx -t 2>/dev/null; then
+        nginx -s reload
+        log_ok "stub_status configurado em 127.0.0.1:8081/nginx_status"
+    fi
+}
+
+# --- Criar script de recuperação ---
+create_recovery_script() {
+    log_info "Criando script de recuperação..."
+    
+    cat > scripts/recover.sh << 'RECOVERY_EOF'
+#!/usr/bin/env bash
+# Duart Panel - Recovery Mode
+set -e
+
+PORT=${PORT:-0}
+
+echo "Duart Panel - Recovery Mode"
+echo "============================"
+
+if ! systemctl is-active --quiet nginx 2>/dev/null; then
+    echo "[!] NGINX está parado. Iniciando com config mínima..."
+    cp -r /etc/nginx/sites-enabled /tmp/nginx-backup-enabled 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/*
+    
+    cat > /etc/nginx/sites-enabled/00-recovery.conf << NGINX_EOF
+server {
+    listen 80;
+    server_name _;
+    root OUT_DIR_PLACEHOLDER;
+    index index.html;
+    location / { try_files \$uri /index.html; }
+    location /api/ { proxy_pass http://127.0.0.1:API_PORT_PLACEHOLDER; }
+}
+NGINX_EOF
+
+    nginx -t && nginx -s reload
+    echo "[OK] NGINX iniciado em modo recovery."
+else
+    echo "[OK] NGINX está rodando."
+fi
+RECOVERY_EOF
+
+    sed -i "s|OUT_DIR_PLACEHOLDER|$(pwd)/out|g" scripts/recover.sh
+    sed -i "s|API_PORT_PLACEHOLDER|$PORT|g" scripts/recover.sh
+    chmod +x scripts/recover.sh
+    
+    log_ok "Script de recuperação: scripts/recover.sh"
+    log_info "  Execute 'npm run recover' ou 'bash scripts/recover.sh' em caso de emergência"
+}
+
+# --- Configurar cron jobs ---
+setup_cron_jobs() {
+    log_info "Configurando cron jobs do painel..."
+    
+    # Registrar cron jobs no sistema (via crontab do root)
+    local CRON_FILE="/tmp/duart-panel-cron"
+    
+    cat > "$CRON_FILE" << CRON_EOF
+# Duart Panel - Cron Jobs Gerenciados
+# SSL Renewal (diário às 03:00)
+0 3 * * * /usr/bin/node $(pwd)/scripts/renew-ssl.js >> /var/lib/duart-panel/logs/ssl-renewal.log 2>&1
+# CPU History Cleanup (30 dias)
+0 0 * * * find /var/lib/duart-panel/cpu-history/ -mtime +30 -delete 2>/dev/null
+# Log Rotation (semanal, domingo)
+0 0 * * 0 /usr/bin/node $(pwd)/scripts/rotate-logs.js >> /var/lib/duart-panel/logs/rotation.log 2>&1
+CRON_EOF
+
+    crontab "$CRON_FILE" 2>/dev/null || true
+    rm -f "$CRON_FILE"
+    
+    log_ok "Cron jobs configurados"
+}
+
 # --- Salvar configuração ---
 save_config() {
     cat > data/settings/config.json << EOF
@@ -332,13 +438,18 @@ save_config() {
   "theme": "dark",
   "port": $PORT,
   "domain": "$DOMAIN",
+  "nginxStubStatus": true,
+  "sslAutoRenew": true,
+  "sslRenewDaysBefore": 5,
+  "backupRetentionCount": 10,
   "installedAt": "$(date -Iseconds)",
   "installedModules": {
     "mysql": false,
     "postgresql": false,
     "mongodb": false,
     "docker": false,
-    "fail2ban": false
+    "fail2ban": false,
+    "certbot": false
   }
 }
 EOF
@@ -374,8 +485,11 @@ main() {
     create_dirs
     build_app
     setup_nginx_vhost
+    setup_nginx_stub_status
     start_app
     save_config
+    setup_cron_jobs
+    create_recovery_script
     show_summary
 }
 
@@ -389,7 +503,8 @@ Após executar `sudo bash install.sh`, o administrador deve:
 1. Acessar `http://DOMINIO` no navegador
 2. Criar o usuário admin (primeiro acesso)
 3. Configurar chave da API da IA em Configurações
-4. Opcionalmente instalar Docker, bancos de dados, fail2ban via interface
+4. Opcionalmente habilitar SSL (Let's Encrypt) para o próprio painel
+5. Opcionalmente instalar Docker, bancos de dados, fail2ban via interface
 
 ## 6. Verificações de Compatibilidade
 

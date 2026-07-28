@@ -613,6 +613,207 @@ Permite à IA sugerir comandos e ao usuário aprová-los.
 
 ---
 
+### 2.11 SSL / Certificados
+
+#### `GET /api/ssl/certificates`
+```typescript
+// Response 200
+{
+  success: true,
+  data: [
+    {
+      id: string, domains: string[], type: "letsencrypt" | "manual" | "cloudflare",
+      issuer: string, validUntil: string, autoRenew: boolean, status: "valid" | "expiring_soon" | "expired"
+    }
+  ]
+}
+```
+
+#### `POST /api/ssl/certificates`
+Emitir/registrar novo certificado.
+
+```typescript
+// Request - Let's Encrypt
+{
+  type: "letsencrypt",
+  domains: ["meusite.com", "www.meusite.com"],
+  method: "http" | "dns",
+  email: "admin@meusite.com"
+}
+
+// Request - Manual
+{
+  type: "manual",
+  domains: ["meusite.com"],
+  cert: "-----BEGIN CERTIFICATE-----\n...",
+  key: "-----BEGIN PRIVATE KEY-----\n...",
+  chain?: "..."
+}
+
+// Request - Cloudflare/Existente
+{
+  type: "cloudflare",
+  domains: ["*.meusite.com"],
+  certPath: "/etc/ssl/cloudflare/origin.pem",
+  keyPath: "/etc/ssl/cloudflare/origin.key",
+  chainPath?: "/etc/ssl/cloudflare/origin_ca_ecc.pem"
+}
+
+// Response 200
+{ success: true, data: { certificate: { id, domains, ... } } }
+```
+
+#### `POST /api/ssl/certificates/:id/renew`
+Renovar certificado.
+
+```typescript
+// Response 200
+{ success: true, data: { renewed: true, newValidUntil: "2026-10-29T00:00:00Z" } }
+```
+
+#### `DELETE /api/ssl/certificates/:id`
+Remover certificado (desassocia de sites primeiro).
+
+---
+
+### 2.12 Tarefas Cron
+
+#### `GET /api/cron/jobs`
+```typescript
+// Response 200
+{
+  success: true,
+  data: {
+    system: [{ expression, command, description }],
+    managed: [...],
+    custom: [...]
+  }
+}
+```
+
+#### `POST /api/cron/jobs`
+```typescript
+// Request
+{ expression: string, command: string, description: string }
+
+// Response 200
+{ success: true, data: { job: { id, ... } } }
+```
+
+#### `PUT /api/cron/jobs/:id`
+#### `DELETE /api/cron/jobs/:id`
+#### `POST /api/cron/jobs/:id/execute`
+Executar job imediatamente.
+
+---
+
+### 2.13 Backup & Restore
+
+#### `GET /api/backup/list`
+#### `POST /api/backup/create`
+```typescript
+// Request
+{ includeCpuHistory: boolean, includeSslCerts: boolean }
+
+// Response 200
+{ success: true, data: { id: string, path: string, size: number, createdAt: string } }
+```
+
+#### `GET /api/backup/download?id=X`
+Download do arquivo `.tar.gz`.
+
+#### `POST /api/backup/restore`
+Multipart upload do backup.
+
+```typescript
+// Request: multipart/form-data { file, overwriteSettings: boolean, keepAdminUser: boolean }
+
+// Response 200
+{ success: true, data: { restored: true, items: number } }
+```
+
+#### `DELETE /api/backup/:id`
+
+---
+
+### 2.14 Logs do Sistema
+
+#### `GET /api/logs/view?source=X&lines=200&filter=&level=&since=`
+```typescript
+// Query params
+{
+  source: "panel" | "nginx-access" | "nginx-error" | "system" | "ufw" | "fail2ban" | "ssl-renewal",
+  lines: number,       // default: 200
+  filter?: string,     // texto ou regex
+  level?: "INFO" | "WARN" | "ERROR",
+  since?: string       // ISO timestamp
+}
+
+// Response 200
+{
+  success: true,
+  data: {
+    source: string,
+    lines: [{ timestamp: string, level: string, message: string }],
+    totalLines: number
+  }
+}
+```
+
+#### `GET /api/logs/sources`
+Lista fontes de log disponíveis.
+
+---
+
+### 2.15 Métricas de Rede
+
+#### `GET /api/system/network`
+```typescript
+// Response 200
+{
+  success: true,
+  data: {
+    interfaces: [{ name: string, rxBytes: number, txBytes: number, rxSpeed: number, txSpeed: number }],
+    connections: { total: number, tcp: number, udp: number, established: number, timeWait: number, listen: number },
+    listeningPorts: [{ port: number, proto: string, process: string }],
+    nginx: { active: number, requestsPerSec: number, status2xx: number, status3xx: number, status4xx: number, status5xx: number }
+  }
+}
+```
+
+#### `GET /api/system/network-history?date=YYYY-MM-DD`
+Histórico de throughput de rede (similar ao CPU history).
+
+---
+
+### 2.16 Modo de Recuperação
+
+#### `POST /api/recovery/check`
+Verifica estado do NGINX e sugere ações.
+
+```typescript
+// Response 200
+{
+  success: true,
+  data: {
+    nginxRunning: boolean,
+    configValid: boolean,
+    panelAccessible: boolean,
+    suggestions: string[]
+  }
+}
+```
+
+#### `POST /api/recovery/restore-nginx`
+Restaura configuração mínima do NGINX para o painel.
+
+```typescript
+// Response 200
+{ success: true, data: { restored: true, nginxRestarted: true } }
+```
+
+---
+
 ## 3. Tratamento de Erros por Categoria
 
 | Código | Significado |

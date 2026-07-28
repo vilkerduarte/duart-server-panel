@@ -8,18 +8,24 @@ O **Duart Panel** é um painel web de gerenciamento de servidores Linux, desenvo
 
 | # | Módulo | Descrição |
 |---|--------|-----------|
-| 1 | **Dashboard** | Visão geral com métricas de CPU, RAM, disco, uptime, carga |
-| 2 | **Monitor de Recursos** | Gráficos históricos de CPU (arquivo txt), memória e armazenamento |
+| 1 | **Dashboard** | Visão geral com métricas de CPU, RAM, disco, rede, uptime, carga |
+| 2 | **Monitor de Recursos** | Gráficos históricos de CPU (arquivo txt), memória, armazenamento e rede |
 | 3 | **Gerenciador de Arquivos** | File manager completo com navegação, upload, download, edição, permissões |
 | 4 | **Gerenciador de Tarefas** | Visão tipo `top`/`htop` com kill de processos (tecla Del) |
-| 5 | **NGINX Manager** | Adicionar/remover sites, PHP-FPM, estáticos, proxy reverso + WebSocket |
+| 5 | **NGINX Manager** | Adicionar/remover sites, PHP-FPM, estáticos, proxy reverso + WebSocket + SSL |
 | 6 | **Firewall (UFW)** | Gestão completa de regras do UFW |
 | 7 | **Docker Manager** | Gestão de containers, imagens, volumes e redes Docker |
 | 8 | **Banco de Dados** | Instalação e gestão de MySQL, PostgreSQL e MongoDB (sob demanda) |
-| 9 | **Segurança** | Gestão do fail2ban, configurações de firewall |
-| 10 | **Configurações** | Hostname, nome do servidor, idioma, chave de API da IA |
-| 11 | **IA Assistant** | Modal com DeepSeek via OpenAI SDK (Ctrl+5 / Cmd+5), modo streaming |
-| 12 | **i18n** | Português (padrão), Inglês, Espanhol — um arquivo por página |
+| 9 | **Segurança** | Gestão do fail2ban, configurações de SSH |
+| 10 | **SSL/TLS** | Let's Encrypt (HTTP/DNS), certificados manuais, Cloudflare Origin, renovação automática |
+| 11 | **Tarefas Cron** | Gestão visual de cron jobs com whitelist de segurança |
+| 12 | **Backup & Restore** | Backup completo do painel e restore via upload |
+| 13 | **Visualizador de Logs** | Centralizador de logs: painel, NGINX, sistema (journalctl), UFW, fail2ban |
+| 14 | **Métricas de Rede** | Throughput, conexões ativas, tráfego por interface, métricas NGINX |
+| 15 | **Modo de Recuperação** | Recovery mode se NGINX quebrar + túnel SSH de emergência |
+| 16 | **Configurações** | Hostname, nome do servidor, idioma, tema (dark/light), chave de API da IA |
+| 17 | **IA Assistant** | Modal com DeepSeek via OpenAI SDK (Ctrl+5 / Cmd+5), modo streaming |
+| 18 | **i18n** | Português (padrão), Inglês, Espanhol — um arquivo por página |
 
 ## 2. Stack Tecnológica
 
@@ -28,9 +34,11 @@ O **Duart Panel** é um painel web de gerenciamento de servidores Linux, desenvo
 - **React 19.2.4**
 - **Tailwind CSS 4** (com `@tailwindcss/postcss`)
 - **react-icons** v5
-- **Chart.js** ou **Recharts** (gráficos)
+- **Recharts** 2.x (gráficos: CPU, rede, histórico)
+- **xterm.js** (terminal web - futuro)
 - **openai** SDK (DeepSeek via OpenAI-compatible endpoint)
 - **Modelo de renderização**: Static Site Generation (SSG). Todas as páginas são exportadas como HTML/CSS/JS estático. Os dados dinâmicos são obtidos exclusivamente via Client-Side Rendering (CSR) através de chamadas `fetch` às API Routes
+- **Tema**: Dark (padrão) e Light, com toggle no header
 
 ### Backend (Dinâmico — API Routes)
 - **Next.js API Routes** (`/pages/api/`) — única porção server-side da aplicação
@@ -46,15 +54,19 @@ O **Duart Panel** é um painel web de gerenciamento de servidores Linux, desenvo
 - `docker` / `docker compose` — containers
 - `mysql-server`, `postgresql`, `mongod` — bancos (instaláveis sob demanda)
 - `php-fpm` — PHP via socket UNIX
+- `certbot` — Let's Encrypt (instalado sob demanda ao usar SSL)
+- `cron` — agendador de tarefas do sistema
 
 ## 3. Princípios de Design
 
 1. **Sem banco de dados**: Tudo persiste em arquivos JSON, `.conf`, `.txt` no filesystem
 2. **Autenticação por arquivo**: Usuário/senha armazenados em `data/auth/users.json` com bcrypt
 3. **Frontend Estático (SSG)**: Todas as páginas são pré-renderizadas como HTML/CSS/JS estático via `next build && next export`. Apenas as API Routes (`/pages/api/`) são dinâmicas (server-side). Todo dado dinâmico é obtido via fetch no client-side (CSR) chamando os endpoints da API
-4. **Baixo acoplamento**: Cada módulo é independente; APIs são stateless
-5. **Segurança**: Todas as chamadas de API validam sessão; comandos shell usam whitelist
-6. **Idempotência**: Operações como instalação de binários verificam estado antes de agir
+4. **Dados persistentes segregados**: Dados do painel armazenados em `/var/lib/duart-panel/data/` (link simbólico a partir do projeto), garantindo que um `rm -rf` no projeto não destrua configurações
+5. **Baixo acoplamento**: Cada módulo é independente; APIs são stateless
+6. **Segurança**: Todas as chamadas de API validam sessão; comandos shell usam whitelist
+7. **Idempotência**: Operações como instalação de binários verificam estado antes de agir
+8. **Resiliência**: Modo de recuperação garante acesso ao painel mesmo se o NGINX quebrar
 
 ## 4. Estrutura de Diretórios (visão macro)
 

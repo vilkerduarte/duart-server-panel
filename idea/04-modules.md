@@ -421,7 +421,7 @@ Configurações globais do painel e do servidor.
 #### 10.1 Aparência e Idioma
 - Nome do servidor (exibido no header e title)
 - Idioma: Português, Inglês, Espanhol
-- Tema: Dark (padrão) / Light
+- **Tema: Dark (padrão) / Light** — toggle visual com ícone sol/lua; preferência salva em `config.json`
 
 #### 10.2 Hostname
 - Campo: hostname atual do sistema
@@ -433,11 +433,19 @@ Configurações globais do painel e do servidor.
 - Modelo: `deepseek-chat` (fixo ou selecionável)
 - Testar conexão: botão "Testar" → `GET /api/ai/test`
 
-#### 10.4 Usuário
+#### 10.4 SSL e Renovação
+- Auto-renovação SSL: liga/desliga
+- Dias antes do vencimento para renovar (padrão: 5)
+- Status da última renovação
+
+#### 10.5 Backup
+- Reter últimos N backups (padrão: 10)
+
+#### 10.6 Usuário
 - Alterar senha do painel
 - (Futuro) Múltiplos usuários
 
-#### 10.5 Manutenção
+#### 10.7 Manutenção
 - Reiniciar painel (PM2 restart)
-- Ver logs do painel (últimas 200 linhas de `data/logs/panel.log`)
+- Modo de recuperação: botão "Verificar NGINX"
 - Versão do painel

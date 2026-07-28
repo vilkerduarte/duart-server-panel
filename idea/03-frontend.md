@@ -111,6 +111,22 @@ pages/
 │   ├── fail2ban.tsx            # fail2ban (SSG + CSR)
 │   └── ssh.tsx                 # Config SSH (SSG + CSR)
 │
+├── ssl/
+│   ├── index.tsx               # Lista de certificados SSL (SSG + CSR)
+│   └── new.tsx                 # Novo certificado (SSG + CSR)
+│
+├── cron/
+│   └── index.tsx               # Gestão de tarefas cron (SSG + CSR)
+│
+├── backup/
+│   └── index.tsx               # Backup & Restore (SSG + CSR)
+│
+├── logs/
+│   └── index.tsx               # Visualizador de logs (SSG + CSR)
+│
+├── network/
+│   └── index.tsx               # Métricas de rede (SSG + CSR)
+│
 ├── settings/
 │   └── index.tsx               # Configurações do painel (SSG + CSR)
 │
@@ -206,9 +222,35 @@ components/
 │   ├── CommandApproval.tsx     # Aprovação de comando sugerido
 │   └── ScriptViewer.tsx        # Visualizador de shell script da IA
 │
+├── ssl/
+│   ├── CertificateCard.tsx     # Card de certificado (domínios, validade, status)
+│   ├── CertificateForm.tsx     # Form: Let's Encrypt / Manual / Cloudflare
+│   └── DnsChallengeModal.tsx   # Modal com registro TXT para DNS-01
+│
+├── cron/
+│   ├── CronJobTable.tsx        # Tabela de cron jobs
+│   ├── CronJobForm.tsx         # Form: expressão cron + comando
+│   └── CronVisualEditor.tsx    # Editor visual (dropdowns em vez de 5 campos)
+│
+├── backup/
+│   ├── BackupList.tsx          # Lista de backups
+│   ├── BackupCreateForm.tsx    # Opções de backup
+│   └── RestoreUploader.tsx     # Upload + preview do restore
+│
+├── logs/
+│   ├── LogSourceSelector.tsx   # Tabs: painel, NGINX, sistema, UFW, fail2ban
+│   ├── LogViewer.tsx           # Área de log com scroll virtual e filtro
+│   └── LogFilterBar.tsx        # Barra: busca, nível, período
+│
+├── network/
+│   ├── ThroughputChart.tsx     # Gráfico de upload/download em tempo real
+│   ├── ConnectionsPanel.tsx    # Conexões TCP/UDP/ESTABLISHED
+│   └── NginxMetrics.tsx        # Métricas do stub_status
+│
 └── settings/
     ├── SettingsForm.tsx         # Form de configurações
     ├── LanguageSelector.tsx     # Seletor de idioma
+    ├── ThemeToggle.tsx          # Toggle dark/light
     └── ApiKeyInput.tsx          # Input de chave API (com máscara)
 ```
 
@@ -241,7 +283,11 @@ components/
 
 ## 5. Design System (Tailwind)
 
-### 5.1 Paleta de Cores
+### 5.1 Temas (Dark e Light)
+
+O painel suporta dois temas: **Dark** (padrão) e **Light**. Implementação via Tailwind CSS 4 com estratégia `class` (`darkMode: 'class'`). O ThemeContext adiciona/remove a classe `"dark"` no `<html>`.
+
+#### Paleta Dark (padrão)
 
 ```
 ┌─────────────────────────────────────┐
@@ -259,6 +305,31 @@ components/
 │  border:        #334155 (slate-700) │
 └─────────────────────────────────────┘
 ```
+
+#### Paleta Light
+
+```
+┌─────────────────────────────────────┐
+│  Tema Claro                         │
+│                                     │
+│  bg-primary:    #f8fafc (slate-50)  │
+│  bg-secondary:  #f1f5f9 (slate-100) │
+│  bg-card:       #ffffff             │
+│  text-primary:  #0f172a (slate-900) │
+│  text-muted:    #64748b (slate-500) │
+│  accent:        #2563eb (blue-600)  │
+│  danger:        #dc2626 (red-600)   │
+│  success:       #16a34a (green-600) │
+│  warning:       #d97706 (amber-600) │
+│  border:        #e2e8f0 (slate-200) │
+└─────────────────────────────────────┘
+```
+
+#### Toggle de Tema
+
+- Ícone de sol/lua no Header
+- Também disponível em Configurações → Aparência
+- Preferência salva em `config.json` (`"theme": "dark" | "light"`)
 
 ### 5.2 Tipografia
 
@@ -291,6 +362,11 @@ components/
 🔒 Segurança        → /security
    ├── fail2ban     → /security/fail2ban
    └── SSH          → /security/ssh
+🔑 SSL/TLS          → /ssl
+⏰ Cron             → /cron
+💾 Backup           → /backup
+📋 Logs             → /logs
+🌍 Rede             → /network
 ⚙️ Configurações    → /settings
 ```
 
