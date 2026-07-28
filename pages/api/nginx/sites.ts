@@ -4,7 +4,7 @@ import { executeCommand } from '@/lib/system';
 import fs from 'fs';
 import path from 'path';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const NGINX_DATA_DIR = path.join(DATA_DIR, 'nginx');
 const SITES_FILE = path.join(NGINX_DATA_DIR, 'sites.json');
 const NGINX_AVAILABLE = '/etc/nginx/sites-available';

@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import { randomBytes } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const AUTH_DIR = path.join(DATA_DIR, 'auth');
 const USERS_FILE = path.join(AUTH_DIR, 'users.json');
 const SECRET_FILE = path.join(AUTH_DIR, '.secret');

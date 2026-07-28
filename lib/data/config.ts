@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+// Usar caminho absoluto para evitar que Turbopack resolva symlink data/ -> /var/lib/duart-panel/
+const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const SETTINGS_DIR = path.join(DATA_DIR, 'settings');
 const CONFIG_FILE = path.join(SETTINGS_DIR, 'config.json');
 

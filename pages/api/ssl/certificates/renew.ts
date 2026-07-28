@@ -4,7 +4,7 @@ import { executeCommand } from '@/lib/system';
 import fs from 'fs';
 import path from 'path';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const SSL_DIR = path.join(DATA_DIR, 'ssl');
 const CERTS_FILE = path.join(SSL_DIR, 'certificates.json');
 

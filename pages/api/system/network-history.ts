@@ -3,7 +3,7 @@ import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
 import fs from 'fs';
 import path from 'path';
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const NETWORK_HISTORY_DIR = path.join(DATA_DIR, 'network-history');
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
