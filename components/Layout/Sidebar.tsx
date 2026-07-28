@@ -7,7 +7,7 @@ import {
   HiOutlineCircleStack, HiOutlineLockClosed, HiOutlineKey,
   HiOutlineClock, HiOutlineArchiveBox, HiOutlineDocumentText,
   HiOutlineServer, HiOutlineCog, HiOutlineChevronLeft,
-  HiOutlineChevronRight,
+  HiOutlineChevronRight, HiOutlineCommandLine,
 } from 'react-icons/hi2';
 
 interface SidebarProps {
@@ -29,6 +29,7 @@ const menuItems = [
   { href: '/cron', icon: HiOutlineClock, label: 'Cron' },
   { href: '/backup', icon: HiOutlineArchiveBox, label: 'Backup' },
   { href: '/logs', icon: HiOutlineDocumentText, label: 'Logs' },
+  { href: '/pm2', icon: HiOutlineCommandLine, label: 'PM2' },
   { href: '/network', icon: HiOutlineServer, label: 'Rede' },
   { href: '/settings', icon: HiOutlineCog, label: 'Config.' },
 ];

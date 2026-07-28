@@ -90,6 +90,28 @@ export const COMMAND_WHITELIST: Record<string, CommandDefinition> = {
 
   // Crontab
   crontab_list: { bin: 'crontab', baseArgs: ['-l'], allowedArgs: [], sudo: false, timeout: 5000 },
+
+  // PM2
+  pm2_jlist: { bin: 'pm2', baseArgs: ['jlist'], allowedArgs: [], sudo: false, timeout: 10000 },
+  pm2_start: { bin: 'pm2', baseArgs: ['start'], allowedArgs: [/^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 30000 },
+  pm2_stop: { bin: 'pm2', baseArgs: ['stop'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 30000 },
+  pm2_restart: { bin: 'pm2', baseArgs: ['restart'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 30000 },
+  pm2_reload: { bin: 'pm2', baseArgs: ['reload'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 30000 },
+  pm2_delete: { bin: 'pm2', baseArgs: ['delete'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 10000 },
+  pm2_save: { bin: 'pm2', baseArgs: ['save'], allowedArgs: [], sudo: false, timeout: 10000 },
+  pm2_startup: { bin: 'pm2', baseArgs: ['startup'], allowedArgs: [], sudo: false, timeout: 10000 },
+  pm2_flush: { bin: 'pm2', baseArgs: ['flush'], allowedArgs: [], sudo: false, timeout: 10000 },
+  pm2_describe: { bin: 'pm2', baseArgs: ['describe'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 10000 },
+  pm2_logs: { bin: 'pm2', baseArgs: ['logs'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/, /^--lines$/, /^\d{1,4}$/, /^--nostream$/], sudo: false, timeout: 10000 },
+  pm2_start_app: { bin: 'pm2', baseArgs: ['start'], allowedArgs: [/^[a-zA-Z0-9_\-./]+$/, /^--name$/, /^[a-zA-Z0-9_\-]+$/, /^--interpreter$/, /^[a-zA-Z0-9_\-./]+$/, /^--cwd$/, /^[a-zA-Z0-9_\-./]+$/, /^--max-memory-restart$/, /^\d+[MG]$/, /^--instances$/, /^\d+$/, /^--env$/, /^[a-zA-Z0-9_\-]+$/], sudo: false, timeout: 30000 },
+  pm2_ping: { bin: 'pm2', baseArgs: ['ping'], allowedArgs: [], sudo: false, timeout: 5000 },
+
+  // Forever
+  forever_list: { bin: 'forever', baseArgs: ['list', '--plain'], allowedArgs: [], sudo: false, timeout: 10000 },
+  forever_start: { bin: 'forever', baseArgs: ['start'], allowedArgs: [/^[a-zA-Z0-9_\-./]+$/, /^--uid$/, /^[a-zA-Z0-9_\-]+$/, /^--sourceDir$/, /^[a-zA-Z0-9_\-./]+$/, /^--workingDir$/, /^[a-zA-Z0-9_\-./]+$/, /^--minUptime$/, /^\d+$/, /^--spinSleepTime$/, /^\d+$/], sudo: false, timeout: 30000 },
+  forever_stop: { bin: 'forever', baseArgs: ['stop'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 30000 },
+  forever_restart: { bin: 'forever', baseArgs: ['restart'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 30000 },
+  forever_logs: { bin: 'forever', baseArgs: ['logs'], allowedArgs: [/^\d+$/, /^[a-zA-Z0-9_\-./]+$/], sudo: false, timeout: 10000 },
 };
 
 export function buildCommand(key: string, extraArgs: string[] = []): { command: string; sudo: boolean; timeout: number } {

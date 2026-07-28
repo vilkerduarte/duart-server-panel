@@ -1,6 +1,7 @@
 /**
  * NGINX configuration helpers.
  * Generates NGINX server block configs for different site types.
+ * Also parses existing NGINX vhost files from the filesystem.
  */
 
 export interface NginxSiteConfig {
@@ -232,4 +233,134 @@ function replaceClosingBrace(config: string, content: string): string {
   const lastBrace = config.lastIndexOf('}');
   if (lastBrace === -1) return config;
   return config.slice(0, lastBrace) + content + '\n}';
+}
+
+/**
+ * Represents a parsed vhost found on the filesystem (not necessarily managed by the panel).
+ */
+export interface ParsedVhost {
+  /** Filename in sites-available */
+  fileName: string;
+  /** Full path to the config file */
+  configPath: string;
+  /** Whether it's symlinked in sites-enabled */
+  enabled: boolean;
+  /** All server_name values found */
+  domains: string[];
+  /** Detected document root */
+  root: string | null;
+  /** Detected proxy_pass target */
+  proxyPass: string | null;
+  /** Whether websocket upgrade headers are present */
+  websocket: boolean;
+  /** PHP-FPM socket path if detected */
+  phpFpmSocket: string | null;
+  /** Detected site type */
+  detectedType: 'static' | 'php' | 'proxy' | 'unknown';
+  /** Whether this vhost is already managed by the panel */
+  managed: boolean;
+  /** Panel site ID if managed */
+  panelId: string | null;
+  /** Listen ports */
+  listenPorts: string[];
+  /** Has SSL configured */
+  ssl: boolean;
+  /** Raw config content (first 8KB) */
+  rawConfigPreview: string;
+}
+
+/**
+ * Parses a single NGINX config file and extracts vhost information.
+ */
+export function parseNginxConfigFile(content: string, fileName: string, configPath: string, enabled: boolean, panelSiteIds: Map<string, string>): ParsedVhost {
+  const domains: string[] = [];
+  let root: string | null = null;
+  let proxyPass: string | null = null;
+  let websocket = false;
+  let phpFpmSocket: string | null = null;
+  const listenPorts: string[] = [];
+  let ssl = false;
+
+  // Extract server_name
+  const serverNameMatch = content.match(/server_name\s+([^;]+);/);
+  if (serverNameMatch) {
+    const names = serverNameMatch[1].trim().split(/\s+/).filter(n => n && n !== '_');
+    domains.push(...names);
+  }
+
+  // Extract root
+  const rootMatch = content.match(/root\s+([^;]+);/);
+  if (rootMatch) {
+    root = rootMatch[1].trim();
+  }
+
+  // Extract proxy_pass
+  const proxyPassMatch = content.match(/proxy_pass\s+(https?:\/\/[^;]+|[^;]+);/);
+  if (proxyPassMatch) {
+    proxyPass = proxyPassMatch[1].trim();
+  }
+
+  // Check for websocket upgrade
+  if (content.includes('Upgrade') && content.includes('Connection') && content.includes('upgrade')) {
+    websocket = true;
+  }
+
+  // Check for PHP-FPM
+  const phpMatch = content.match(/fastcgi_pass\s+([^;]+);/);
+  if (phpMatch) {
+    phpFpmSocket = phpMatch[1].trim();
+  }
+
+  // Extract listen directives
+  const listenMatches = content.matchAll(/listen\s+([^;]+);/g);
+  for (const m of listenMatches) {
+    const listen = m[1].trim();
+    listenPorts.push(listen);
+    if (listen.includes('443') || listen.includes('ssl')) {
+      ssl = true;
+    }
+  }
+
+  // Also check for ssl_certificate directives
+  if (content.includes('ssl_certificate')) {
+    ssl = true;
+  }
+
+  // Detect type
+  let detectedType: ParsedVhost['detectedType'] = 'unknown';
+  if (phpFpmSocket) {
+    detectedType = 'php';
+  } else if (proxyPass) {
+    detectedType = 'proxy';
+  } else if (root) {
+    detectedType = 'static';
+  }
+
+  // Check if managed by panel (match by domain in panelSiteIds)
+  let managed = false;
+  let panelId: string | null = null;
+  for (const domain of domains) {
+    if (panelSiteIds.has(domain)) {
+      managed = true;
+      panelId = panelSiteIds.get(domain) || null;
+      break;
+    }
+  }
+
+  return {
+    fileName,
+    configPath,
+    enabled,
+    domains,
+    root,
+    proxyPass,
+    websocket,
+    phpFpmSocket,
+    detectedType,
+    managed,
+    panelId,
+    listenPorts,
+    ssl,
+    rawConfigPreview: content.substring(0, 8192),
+  };
 }

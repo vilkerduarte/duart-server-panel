@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
 import { executeCommand } from '@/lib/system';
+import { parseNginxConfigFile, ParsedVhost } from '@/lib/nginx';
 import fs from 'fs';
 import path from 'path';
 
@@ -22,6 +23,8 @@ interface NginxSite {
   ssl: boolean;
   enabled: boolean;
   configPath: string;
+  fileName?: string;
+  managed: boolean;
   createdAt: string;
 }
 
@@ -101,13 +104,97 @@ function generateProxyConfig(domain: string, port: number, websocket: boolean): 
   return config;
 }
 
+/**
+ * Scans the filesystem for NGINX vhosts and parses them.
+ * Returns both managed (panel) and unmanaged (external) vhosts.
+ */
+function scanVhosts(): { managed: NginxSite[]; external: ParsedVhost[] } {
+  const data = readSites();
+  const managedSites: NginxSite[] = data.sites || [];
+
+  // Build a map of domain -> panel ID for matching
+  const panelSiteIds = new Map<string, string>();
+  for (const site of managedSites) {
+    panelSiteIds.set(site.domain, site.id);
+  }
+
+  const external: ParsedVhost[] = [];
+
+  // Get list of enabled sites (symlinks)
+  const enabledFiles = new Set<string>();
+  if (fs.existsSync(NGINX_ENABLED)) {
+    const enabled = fs.readdirSync(NGINX_ENABLED);
+    for (const f of enabled) {
+      enabledFiles.add(f);
+    }
+  }
+
+  // Scan sites-available
+  if (fs.existsSync(NGINX_AVAILABLE)) {
+    const availableFiles = fs.readdirSync(NGINX_AVAILABLE);
+    for (const fileName of availableFiles) {
+      // Skip default and backup files
+      if (fileName === 'default' || fileName.endsWith('.bak') || fileName.endsWith('.backup') || fileName.endsWith('~')) {
+        continue;
+      }
+
+      const configPath = path.join(NGINX_AVAILABLE, fileName);
+      let stat;
+      try {
+        stat = fs.statSync(configPath);
+      } catch {
+        continue;
+      }
+
+      // Skip directories
+      if (!stat.isFile()) continue;
+
+      let content: string;
+      try {
+        content = fs.readFileSync(configPath, 'utf-8');
+      } catch {
+        continue;
+      }
+
+      const enabled = enabledFiles.has(fileName);
+      const parsed = parseNginxConfigFile(content, fileName, configPath, enabled, panelSiteIds);
+
+      // Only add as external if NOT already managed by the panel
+      if (!parsed.managed) {
+        external.push(parsed);
+      }
+    }
+  }
+
+  return { managed: managedSites, external };
+}
+
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
   try {
+    // GET - List all sites (managed + external vhosts)
     if (req.method === 'GET') {
+      const { scan } = req.query;
+
+      // If scan=true, do a full filesystem scan
+      if (scan === 'true') {
+        const { managed, external } = scanVhosts();
+        return res.status(200).json({
+          success: true,
+          data: {
+            managed,
+            external,
+            totalManaged: managed.length,
+            totalExternal: external.length,
+          },
+        });
+      }
+
+      // Default: return managed sites only (backward compatible)
       const data = readSites();
       return res.status(200).json({ success: true, data: data.sites });
     }
 
+    // POST - Create new site
     if (req.method === 'POST') {
       const { domain, type, root, proxyPort, proxyUrl, websocket, phpVersion } = req.body;
 
@@ -119,6 +206,15 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       const data = readSites();
       if (data.sites.find((s: NginxSite) => s.domain === domain)) {
         return res.status(409).json({ success: false, error: 'Domínio já existe' });
+      }
+
+      // Also check if a vhost file already exists on disk
+      const existingPath = path.join(NGINX_AVAILABLE, domain);
+      if (fs.existsSync(existingPath)) {
+        return res.status(409).json({
+          success: false,
+          error: `Já existe um arquivo de configuração em ${existingPath}. Use a opção Importar.`,
+        });
       }
 
       const id = require('uuid').v4();
@@ -171,6 +267,8 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         ssl: false,
         enabled: true,
         configPath,
+        fileName: domain,
+        managed: true,
         createdAt: new Date().toISOString(),
       };
 
@@ -180,6 +278,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       return res.status(200).json({ success: true, data: { site, nginxReloaded: true } });
     }
 
+    // DELETE - Remove a site
     if (req.method === 'DELETE') {
       const { id } = req.query;
       const data = readSites();
