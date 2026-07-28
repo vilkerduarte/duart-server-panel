@@ -14,7 +14,6 @@ echo "============================"
 # Detect paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-OUT_DIR="$PROJECT_DIR/out"
 
 # Try to get port from config
 PORT=$(node -e "try{const c=require('$PROJECT_DIR/data/settings/config.json');console.log(c.port||0)}catch(e){console.log(0)}" 2>/dev/null || echo "0")
@@ -33,10 +32,14 @@ if ! systemctl is-active --quiet nginx 2>/dev/null; then
 server {
     listen 80;
     server_name _;
-    root $OUT_DIR;
-    index index.html;
-    location / { try_files \$uri /index.html; }
-    location /api/ { proxy_pass http://127.0.0.1:$PORT; }
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
 }
 NGINXEOF
 

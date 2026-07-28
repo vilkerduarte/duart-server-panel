@@ -4,6 +4,7 @@ set -euo pipefail
 # ============================================
 # Duart Panel - Installation Script
 # Alvo: Ubuntu 25.10 / Debian-based
+# Arquitetura: Next.js full server (NGINX proxy reverso total)
 # ============================================
 
 RED='\033[0;31m'
@@ -81,7 +82,7 @@ ufw --force enable
 log_ok "UFW configurado"
 
 # --- Porta aleatória ---
-log_info "Elegendo porta..."
+log_info "Elegendo porta para o Next.js..."
 while true; do
     PORT=$((10000 + RANDOM % 50000))
     if ! ss -tuln | grep -q ":${PORT} "; then
@@ -91,41 +92,36 @@ done
 log_ok "Porta: $PORT"
 
 # --- Diretórios ---
-log_info "Criando estrutura..."
+log_info "Criando estrutura de diretórios..."
 DATA_HOME="/var/lib/duart-panel"
 mkdir -p "$DATA_HOME"/{auth,cpu-history,network-history,nginx,ssl,cron,backups,settings,firewall,logs}
 mkdir -p /etc/ssl/duart-panel/certs
 ln -sf "$DATA_HOME" "$(pwd)/data" 2>/dev/null || true
-log_ok "Diretórios criados"
+log_ok "Diretórios criados em $DATA_HOME"
 
 # --- Build ---
-log_info "Instalando dependências..."
+log_info "Instalando dependências npm..."
 npm install --production
-log_info "Build..."
+log_info "Build da aplicação (Next.js)..."
 npm run build 2>&1 | tail -5
 log_ok "Build concluído"
 
-# --- NGINX vhost ---
-log_info "Configurando NGINX..."
-OUT_DIR="$(pwd)/out"
+# --- NGINX vhost (proxy reverso total para Next.js) ---
+log_info "Configurando NGINX (proxy reverso para Next.js)..."
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
 
 cat > "$NGINX_CONF" << NGINXEOF
+# Duart Panel - $DOMAIN
+# NGINX como proxy reverso para o servidor Next.js na porta $PORT
+
 server {
     listen 80;
     server_name $DOMAIN;
-    root $OUT_DIR;
-    index index.html;
+
     access_log /var/log/nginx/$DOMAIN-access.log;
     error_log  /var/log/nginx/$DOMAIN-error.log;
+
     location / {
-        try_files \$uri \$uri/ /index.html;
-        location ~* \\.(?:css|js|svg|ico|png|jpg|webp|woff2?)\$ {
-            expires 1y;
-            add_header Cache-Control "public, immutable";
-        }
-    }
-    location /api/ {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
@@ -145,15 +141,15 @@ rm -f /etc/nginx/sites-enabled/default
 
 if nginx -t 2>/dev/null; then
     nginx -s reload
-    log_ok "NGINX configurado"
+    log_ok "NGINX configurado (proxy total para porta $PORT)"
 else
-    log_error "Config NGINX inválida"
+    log_error "Configuração NGINX inválida"
     nginx -t
     exit 1
 fi
 
-# --- PM2 ---
-log_info "Iniciando API..."
+# --- PM2 (servidor Next.js completo: páginas + API) ---
+log_info "Iniciando servidor Next.js (páginas + API)..."
 if ! command -v pm2 &>/dev/null; then
     npm install -g pm2
 fi
@@ -161,7 +157,7 @@ fi
 cat > ecosystem.config.js << PM2EOF
 module.exports = {
   apps: [{
-    name: 'duart-panel-api',
+    name: 'duart-panel',
     script: 'node_modules/.bin/next',
     args: 'start -p $PORT',
     cwd: '$(pwd)',
@@ -174,7 +170,7 @@ PM2EOF
 pm2 start ecosystem.config.js
 pm2 save
 pm2 startup systemd -u root --hp /root 2>/dev/null || true
-log_ok "API iniciada na porta $PORT"
+log_ok "Next.js iniciado via PM2 na porta $PORT (páginas + API)"
 
 # --- Config ---
 mkdir -p data/settings
@@ -197,13 +193,34 @@ cat > data/settings/config.json << CONFEOF
 }
 CONFEOF
 
+# --- SSL Setup (Let's Encrypt) ---
+log_info "Configurando SSL automaticamente..."
+if bash scripts/setup-ssl.sh "$DOMAIN" "admin@$DOMAIN" 2>&1; then
+    log_ok "SSL configurado com sucesso!"
+    SSL_ENABLED=true
+else
+    log_warn "Falha ao configurar SSL. O painel funcionará em HTTP."
+    log_warn "Execute 'sudo bash scripts/setup-ssl.sh $DOMAIN' manualmente depois."
+    SSL_ENABLED=false
+fi
+
 echo ""
 echo "========================================"
 echo -e "   ${GREEN}Instalacao Concluida!${NC}"
 echo "========================================"
 echo ""
-echo -e "  URL:        ${BLUE}http://$DOMAIN${NC}"
-echo -e "  Porta API:  ${BLUE}$PORT${NC}"
+if [[ "${SSL_ENABLED:-false}" == "true" ]]; then
+    echo -e "  URL:        ${BLUE}https://$DOMAIN${NC}"
+else
+    echo -e "  URL:        ${BLUE}http://$DOMAIN${NC}"
+fi
+echo -e "  Next.js:    porta ${BLUE}$PORT${NC} (NGINX → proxy reverso total)"
 echo ""
-echo -e "  ${YELLOW}Acesse http://$DOMAIN e crie seu usuario admin${NC}"
+if [[ "${SSL_ENABLED:-false}" == "true" ]]; then
+    echo -e "  ${GREEN}SSL ativo! Renovacao automatica configurada.${NC}"
+else
+    echo -e "  ${YELLOW}SSL nao configurado. Execute: sudo bash scripts/setup-ssl.sh $DOMAIN${NC}"
+fi
+echo ""
+echo -e "  ${YELLOW}Acesse e crie seu usuario admin${NC}"
 echo ""

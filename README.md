@@ -76,11 +76,49 @@ Acesse `http://SEU_DOMINIO` no navegador:
 
 ---
 
+## Arquitetura
+
+O Duart Panel utiliza o **Next.js como servidor completo** (páginas + API), com o **NGINX como proxy reverso** na frente.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    CLIENTE (Browser)                  │
+│  React 19 + Tailwind CSS 4 + react-icons + Charts    │
+└──────────────────────┬───────────────────────────────┘
+                       │ HTTPS (ou HTTP)
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│                 NGINX (Proxy Reverso)                 │
+│                                                      │
+│  location / {                                         │
+│    proxy_pass http://127.0.0.1:PORT;  → TUDO para    │
+│  }                                      Next.js       │
+│                                                      │
+│  + SSL (Let's Encrypt, configurado automaticamente)   │
+└──────────────────────┬───────────────────────────────┘
+                       │
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│          Next.js Server (PM2 - porta aleatória)       │
+│                                                      │
+│  • Páginas React (Server-Side Rendering)              │
+│  • API Routes (REST)                                  │
+│  • Streaming IA (SSE)                                 │
+│                                                      │
+└──────────────────────┬───────────────────────────────┘
+                       │ child_process / fs
+                       ▼
+┌──────────────────────────────────────────────────────┐
+│                  SISTEMA OPERACIONAL                  │
+│  NGINX │ UFW │ Docker │ MySQL │ fail2ban │ certbot   │
+└──────────────────────────────────────────────────────┘
+```
+
 ## Estrutura de Diretórios
 
 ```
 /opt/duart-panel/               # Código do projeto
-├── pages/                      # Pages Router (SSG + API Routes)
+├── pages/                      # Pages Router (páginas + API Routes)
 ├── components/                 # Componentes React
 ├── lib/                        # Bibliotecas internas
 │   ├── ai/                     # Cliente IA (DeepSeek) + parser
@@ -94,10 +132,11 @@ Acesse `http://SEU_DOMINIO` no navegador:
 ├── languages/                  # i18n (pt-BR, en-US, es-ES)
 ├── scripts/                    # Scripts do sistema
 │   ├── install.sh              # Instalação completa
+│   ├── setup-ssl.sh            # Configurar SSL (Let's Encrypt)
+│   ├── remove-ssl.sh           # Remover SSL
 │   ├── recover.sh              # Modo de recuperação
 │   ├── renew-ssl.js            # Renovação automática SSL
 │   └── rotate-logs.js          # Rotação de logs
-└── out/                        # Output estático (SSG)
 
 /var/lib/duart-panel/           # Dados persistentes
 ├── auth/                       # Usuários e chave JWT
@@ -130,11 +169,11 @@ Acesse `http://SEU_DOMINIO` no navegador:
 | Camada | Tecnologia |
 |--------|-----------|
 | **Frontend** | React 19, Next.js 16 (Pages Router), Tailwind CSS 4, Recharts, react-icons |
-| **Renderização** | SSG (`next export`) + CSR (fetch às API Routes) |
+| **Renderização** | Next.js Server (SSR + API Routes via PM2) |
 | **Backend** | Next.js API Routes, Node.js 22 |
 | **IA** | DeepSeek via OpenAI SDK (streaming SSE) |
 | **Process Manager** | PM2 |
-| **Proxy Reverso** | NGINX |
+| **Proxy Reverso** | NGINX (proxy total → `http://127.0.0.1:PORT`) |
 | **Persistência** | File-based (JSON, .conf, .txt) — sem banco de dados |
 
 ---
