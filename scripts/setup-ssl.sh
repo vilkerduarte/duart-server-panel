@@ -137,7 +137,15 @@ cat > "$NGINX_CONF" << NGINXEOF
 server {
     listen 80;
     server_name $DOMAIN;
-    return 301 https://\$server_name\$request_uri;
+
+    # Let's Encrypt ACME challenge (renovação)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://\$server_name\$request_uri;
+    }
 }
 
 # HTTPS (proxy reverso total para Next.js)
@@ -156,6 +164,11 @@ server {
 
     access_log /var/log/nginx/$DOMAIN-access.log;
     error_log  /var/log/nginx/$DOMAIN-error.log;
+
+    # Let's Encrypt ACME challenge (servido localmente)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;

@@ -310,6 +310,11 @@ server {
     access_log /var/log/nginx/$DOMAIN-access.log;
     error_log  /var/log/nginx/$DOMAIN-error.log;
 
+    # Let's Encrypt ACME challenge (servido localmente, sem proxy)
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;

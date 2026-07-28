@@ -32,6 +32,12 @@ if ! systemctl is-active --quiet nginx 2>/dev/null; then
 server {
     listen 80;
     server_name _;
+
+    # Let's Encrypt ACME challenge
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_http_version 1.1;
