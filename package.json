@@ -10,7 +10,9 @@
     "recover": "bash scripts/recover.sh"
   },
   "dependencies": {
+    "@types/formidable": "^3.5.1",
     "bcryptjs": "^2.4.3",
+    "formidable": "^3.5.4",
     "jsonwebtoken": "^9.0.2",
     "next": "16.2.12",
     "openai": "^4.104.0",

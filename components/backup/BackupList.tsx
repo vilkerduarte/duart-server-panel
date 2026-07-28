@@ -1,6 +1,6 @@
 import Card from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
-import { HiOutlineDownload, HiOutlineTrash } from 'react-icons/hi2';
+import { HiOutlineDownload, HiOutlineTrash } from 'react-icons/hi';
 
 interface BackupListProps {
   backups: any[];
