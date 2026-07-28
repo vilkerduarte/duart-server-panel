@@ -1,66 +1,48 @@
 import { useEffect, useState } from 'react';
 import AppLayout from '@/components/Layout/AppLayout';
-import Card from '@/components/ui/Card';
 import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
-import Input from '@/components/ui/Input';
-import Badge from '@/components/ui/Badge';
+import DbStatusCard from '@/components/databases/DbStatusCard';
+
+const DB_TYPES = ['mysql', 'postgresql', 'mongodb'] as const;
+const DB_NAMES: Record<string, string> = { mysql: 'MySQL', postgresql: 'PostgreSQL', mongodb: 'MongoDB' };
 
 export default function DatabasesPage() {
-  const [selected, setSelected] = useState<'mysql' | 'postgresql' | 'mongodb'>('mysql');
-  const [data, setData] = useState<any>(null);
+  const [selected, setSelected] = useState<string>('mysql');
+  const [dbData, setDbData] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/databases/${selected}`)
-      .then(res => res.json())
-      .then(json => { if (json.success) setData(json.data); })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    const db = selected;
+    fetch(`/api/databases/${db}`).then(r => r.json()).then(j => {
+      if (j.success) setDbData(prev => ({ ...prev, [db]: j.data }));
+    }).catch(() => {}).finally(() => setLoading(false));
   }, [selected]);
+
+  const handleInstall = async (db: string) => {
+    if (!confirm(`Instalar ${DB_NAMES[db]}? Pode levar alguns minutos.`)) return;
+    await fetch(`/api/databases/${db}/install`, { method: 'POST' });
+    // Refresh
+    const res = await fetch(`/api/databases/${db}`);
+    const json = await res.json();
+    if (json.success) setDbData(prev => ({ ...prev, [db]: json.data }));
+  };
+
+  const currentData = dbData[selected];
 
   return (
     <AppLayout>
       <div className="space-y-4">
         <h1 className="text-2xl font-bold text-[var(--text-primary)]">Bancos de Dados</h1>
-
         <div className="flex gap-2">
-          {(['mysql', 'postgresql', 'mongodb'] as const).map(db => (
-            <Button
-              key={db}
-              variant={selected === db ? 'primary' : 'ghost'}
-              size="sm"
-              onClick={() => setSelected(db)}
-            >
-              {db === 'mysql' ? 'MySQL' : db === 'postgresql' ? 'PostgreSQL' : 'MongoDB'}
-            </Button>
+          {DB_TYPES.map(db => (
+            <Button key={db} variant={selected === db ? 'primary' : 'ghost'} size="sm" onClick={() => setSelected(db)}>{DB_NAMES[db]}</Button>
           ))}
         </div>
-
-        {loading ? (
-          <div className="flex justify-center py-12"><Spinner size="lg" /></div>
-        ) : data ? (
-          <Card>
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-[var(--text-muted)]">Status:</span>
-                <Badge variant={data.installed ? 'success' : 'warning'}>
-                  {data.installed ? 'Instalado' : 'Não Instalado'}
-                </Badge>
-                {data.running && <Badge variant="success">Rodando</Badge>}
-              </div>
-              {data.version && (
-                <p className="text-sm"><span className="text-[var(--text-muted)]">Versão:</span> <span className="text-[var(--text-primary)]">{data.version}</span></p>
-              )}
-              {data.port && (
-                <p className="text-sm"><span className="text-[var(--text-muted)]">Porta:</span> <span className="text-[var(--text-primary)]">{data.port}</span></p>
-              )}
-            </div>
-          </Card>
-        ) : (
-          <Card><p className="text-center text-[var(--text-muted)] py-8">Não foi possível obter informações</p></Card>
-        )}
+        {loading ? <div className="flex justify-center py-12"><Spinner size="lg" /></div> : currentData ? (
+          <DbStatusCard name={DB_NAMES[selected]} installed={currentData.installed} running={currentData.running} version={currentData.version} port={currentData.port} onInstall={() => handleInstall(selected)} />
+        ) : <DbStatusCard name={DB_NAMES[selected]} installed={false} running={false} onInstall={() => handleInstall(selected)} />}
       </div>
     </AppLayout>
   );

@@ -1,0 +1,3 @@
+module.exports = {
+  files: { title: "Gestor de Archivos", upload: "Subir", download: "Descargar", rename: "Renombrar", permissions: "Permisos", newFolder: "Nueva Carpeta", newFile: "Nuevo Archivo", path: "Ruta", name: "Nombre", type: "Tipo", size: "Tamaño", modified: "Modificado", owner: "Dueño", group: "Grupo", directory: "Directorio", file: "Archivo", symlink: "Enlace Simbólico", confirmDelete: "¿Eliminar?", fileContent: "Contenido", editFile: "Editar", copy: "Copiar", cut: "Cortar", paste: "Pegar", errorLoading: "Error al cargar", errorSaving: "Error al guardar", saved: "Guardado", uploaded: "Subido", deleted: "Eliminado", created: "Creado", renamed: "Renombrado", permissionsChanged: "Permisos cambiados", home: "Inicio" }
+};

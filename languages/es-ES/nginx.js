@@ -1,0 +1,3 @@
+module.exports = {
+  nginx: { title: "NGINX Manager", sites: "Sitios", newSite: "Nuevo Sitio", type: "Tipo", domain: "Dominio", root: "Ruta Root", proxyPort: "Puerto Proxy", websocket: "WebSocket", static: "Estático", php: "PHP", proxy: "Proxy Reverso", enabled: "Activado", disabled: "Desactivado", ssl: "SSL", siteCreated: "Sitio {domain} creado", siteDeleted: "Sitio {domain} eliminado", siteUpdated: "Sitio {domain} actualizado", nginxReloaded: "NGINX recargado", nginxError: "Error NGINX", confirmDelete: "¿Eliminar {domain}?", domainExists: "Dominio ya existe", errorLoading: "Error al cargar" }
+};
