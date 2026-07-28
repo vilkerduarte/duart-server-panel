@@ -1,40 +1,167 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/pages/api-reference/create-next-app).
+# Duart Panel
 
-## Getting Started
+Painel web de gerenciamento de servidores Linux desenvolvido com **Next.js 16** + **React 19** + **Tailwind CSS 4**, operando completamente sem banco de dados — toda persistência via arquivos no sistema.
 
-First, run the development server:
+---
+
+## Funcionalidades
+
+| # | Módulo | Descrição |
+|---|--------|-----------|
+| 1 | **Dashboard** | Métricas de CPU, RAM, disco, rede, uptime em tempo real |
+| 2 | **Monitor de Recursos** | Gráficos históricos de CPU, memória, armazenamento |
+| 3 | **Gerenciador de Arquivos** | Navegação, upload, download, edição, permissões |
+| 4 | **Gerenciador de Tarefas** | Visão `htop` com kill de processos |
+| 5 | **NGINX Manager** | Criar/remover sites (estático, PHP, proxy reverso + WebSocket) |
+| 6 | **Firewall (UFW)** | Gestão completa de regras, toggle on/off |
+| 7 | **Docker Manager** | Containers, imagens, volumes, redes, docker compose |
+| 8 | **Bancos de Dados** | Instalação e gestão de MySQL, PostgreSQL, MongoDB |
+| 9 | **Segurança** | fail2ban (instalação, jails, bans), configuração SSH |
+| 10 | **SSL/TLS** | Let's Encrypt (HTTP/DNS), certificados manuais, Cloudflare Origin |
+| 11 | **Tarefas Cron** | Gestão visual de cron jobs com validação |
+| 12 | **Backup & Restore** | Backup completo e restore via upload |
+| 13 | **Visualizador de Logs** | Painel, NGINX, sistema, UFW, fail2ban, SSL |
+| 14 | **Métricas de Rede** | Throughput, conexões ativas, portas, métricas NGINX |
+| 15 | **Modo de Recuperação** | Recovery mode se NGINX quebrar |
+| 16 | **IA Assistant** | Chat com DeepSeek via OpenAI SDK (`Ctrl+5`), modo streaming |
+| 17 | **Configurações** | Hostname, idioma (PT/EN/ES), tema dark/light, API key |
+| 18 | **i18n** | Português (padrão), Inglês, Espanhol |
+
+---
+
+## Requisitos do Servidor
+
+- **Ubuntu 22.04+ / Debian 12+** (alvo principal: Ubuntu 25.10)
+- Acesso **root** ou **sudo**
+- Domínio apontado para o IP do servidor (DNS configurado)
+- Portas **22**, **80**, **443** liberadas no provedor
+
+---
+
+## Instalação
+
+### 1. Clone o repositório
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone https://github.com/seu-usuario/duart-panel.git /opt/duart-panel
+cd /opt/duart-panel
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Execute o script de instalação
 
-You can start editing the page by modifying `pages/index.tsx`. The page auto-updates as you edit the file.
+```bash
+sudo bash scripts/install.sh
+```
 
-[API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.ts`.
+O script solicitará o domínio e executará automaticamente:
 
-The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/pages/building-your-application/routing/api-routes) instead of React pages.
+- ✅ Verificação/instalação do **Node.js 22** via NVM
+- ✅ Instalação/configuração do **NGINX**
+- ✅ Configuração do **UFW** (portas 22, 587, 80, 443)
+- ✅ Eleição de porta aleatória (10000-60000)
+- ✅ Criação da estrutura de diretórios em `/var/lib/duart-panel/`
+- ✅ `npm install` + build (`next build && next export`)
+- ✅ Configuração do vhost NGINX (proxy reverso)
+- ✅ Instalação do **PM2** + startup automática
+- ✅ Configuração de cron jobs (SSL renewal, log rotation)
+- ✅ Criação do script de recuperação
 
-This project uses [`next/font`](https://nextjs.org/docs/pages/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 3. Primeiro acesso
 
-## Learn More
+Acesse `http://SEU_DOMINIO` no navegador:
 
-To learn more about Next.js, take a look at the following resources:
+1. Crie o usuário **admin** (primeiro acesso)
+2. Configure a chave da API DeepSeek em **Configurações** (opcional)
+3. Opcionalmente instale Docker, bancos de dados, fail2ban via interface
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn-pages-router) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Estrutura de Diretórios
 
-## Deploy on Vercel
+```
+/opt/duart-panel/               # Código do projeto
+├── pages/                      # Pages Router (SSG + API Routes)
+├── components/                 # Componentes React
+├── lib/                        # Bibliotecas internas
+│   ├── ai/                     # Cliente IA (DeepSeek) + parser
+│   ├── contexts/               # Auth, I18n, Theme, Toast
+│   ├── hooks/                  # useApi, useKeyboard
+│   ├── middleware/              # Auth middleware
+│   ├── auth.ts                 # Autenticação
+│   ├── system.ts               # Comandos de sistema (whitelist)
+│   ├── nginx.ts                # Geradores de config NGINX
+│   └── docker.ts               # Parsers Docker
+├── languages/                  # i18n (pt-BR, en-US, es-ES)
+├── scripts/                    # Scripts do sistema
+│   ├── install.sh              # Instalação completa
+│   ├── recover.sh              # Modo de recuperação
+│   ├── renew-ssl.js            # Renovação automática SSL
+│   └── rotate-logs.js          # Rotação de logs
+└── out/                        # Output estático (SSG)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+/var/lib/duart-panel/           # Dados persistentes
+├── auth/                       # Usuários e chave JWT
+├── cpu-history/                # Histórico CPU (1 arquivo/dia)
+├── nginx/                      # Registro de sites
+├── ssl/                        # Registro de certificados
+├── cron/                       # Jobs customizados
+├── backups/                    # Arquivos .tar.gz
+├── settings/                   # config.json
+└── logs/                       # Logs do painel
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/pages/building-your-application/deploying) for more details.
+---
+
+## Comandos Úteis
+
+| Comando | Descrição |
+|---------|-----------|
+| `pm2 status` | Status do servidor API |
+| `pm2 logs duart-panel-api` | Logs em tempo real |
+| `pm2 restart duart-panel-api` | Reiniciar API |
+| `sudo bash scripts/recover.sh` | Modo de recuperação (NGINX quebrado) |
+| `sudo nginx -t` | Testar configuração NGINX |
+| `sudo nginx -s reload` | Recarregar NGINX |
+
+---
+
+## Stack Tecnológica
+
+| Camada | Tecnologia |
+|--------|-----------|
+| **Frontend** | React 19, Next.js 16 (Pages Router), Tailwind CSS 4, Recharts, react-icons |
+| **Renderização** | SSG (`next export`) + CSR (fetch às API Routes) |
+| **Backend** | Next.js API Routes, Node.js 22 |
+| **IA** | DeepSeek via OpenAI SDK (streaming SSE) |
+| **Process Manager** | PM2 |
+| **Proxy Reverso** | NGINX |
+| **Persistência** | File-based (JSON, .conf, .txt) — sem banco de dados |
+
+---
+
+## Segurança
+
+- Autenticação JWT com cookies HttpOnly
+- Senhas com bcrypt (12 rounds)
+- Whitelist de comandos shell
+- Proteção contra path traversal
+- Bloqueio de comandos perigosos (fork bombs, wipe disk)
+- API key da IA mascarada no frontend
+- Permissões restritas em arquivos sensíveis (600/640)
+
+---
+
+## Compatibilidade
+
+| Distro | Versão | Status |
+|--------|--------|--------|
+| Ubuntu | 25.10 | ✅ Alvo principal |
+| Ubuntu | 24.04 LTS | ✅ Compatível |
+| Ubuntu | 22.04 LTS | ✅ Compatível |
+| Debian | 12 (Bookworm) | ✅ Compatível |
+
+---
+
+## Licença
+
+MIT
