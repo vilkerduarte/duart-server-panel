@@ -5,10 +5,13 @@ import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import Badge from '@/components/ui/Badge';
 import SiteForm from '@/components/nginx/SiteForm';
+import SiteEditModal from '@/components/nginx/SiteEditModal';
 import { useToast } from '@/lib/contexts/ToastContext';
 import {
   HiOutlinePlus, HiOutlineTrash, HiOutlineMagnifyingGlass,
   HiOutlineArrowDownTray, HiOutlineGlobeAlt, HiOutlineServer,
+  HiOutlinePencilSquare, HiOutlineShieldCheck, HiOutlineWrench,
+  HiOutlinePower, HiOutlinePlay,
 } from 'react-icons/hi2';
 
 interface ExternalVhost {
@@ -38,6 +41,14 @@ export default function NginxPage() {
   const [showExternal, setShowExternal] = useState(false);
   const [activeTab, setActiveTab] = useState<'managed' | 'external'>('managed');
   const [importingFile, setImportingFile] = useState<string | null>(null);
+
+  // Edit modal
+  const [editingSite, setEditingSite] = useState<any>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+
+  // Action loading states
+  const [togglingSite, setTogglingSite] = useState<string | null>(null);
+  const [maintenanceSite, setMaintenanceSite] = useState<string | null>(null);
 
   const fetchSites = async () => {
     setLoading(true);
@@ -98,12 +109,85 @@ export default function NginxPage() {
     showToast(`${domain} removido`, 'success');
   };
 
+  const handleToggle = async (site: any) => {
+    setTogglingSite(site.id);
+    try {
+      const res = await fetch('/api/nginx/sites', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: site.id, action: 'toggle' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setSites(prev => prev.map(s => s.id === site.id ? json.data.site : s));
+        showToast(json.data.enabled ? `${site.domain} ativado` : `${site.domain} desativado`, 'success');
+      } else {
+        showToast(json.error || 'Erro ao alternar status', 'error');
+      }
+    } catch {
+      showToast('Erro de conexão', 'error');
+    } finally {
+      setTogglingSite(null);
+    }
+  };
+
+  const handleToggleMaintenance = async (site: any) => {
+    setMaintenanceSite(site.id);
+    try {
+      const res = await fetch('/api/nginx/sites', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: site.id, action: 'maintenance' }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setSites(prev => prev.map(s => s.id === site.id ? json.data.site : s));
+        showToast(
+          json.data.maintenance
+            ? `Modo manutenção ativado para ${site.domain}`
+            : `Modo manutenção desativado para ${site.domain}`,
+          'success'
+        );
+      } else {
+        showToast(json.error || 'Erro ao alternar manutenção', 'error');
+      }
+    } catch {
+      showToast('Erro de conexão', 'error');
+    } finally {
+      setMaintenanceSite(null);
+    }
+  };
+
+  const handleEdit = (site: any) => {
+    setEditingSite(site);
+    setShowEditModal(true);
+  };
+
+  const handleEditSubmit = async (data: any) => {
+    const res = await fetch('/api/nginx/sites', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (json.success) {
+      setSites(prev => prev.map(s => s.id === json.data.site.id ? json.data.site : s));
+      showToast(`${data.domain} atualizado com sucesso`, 'success');
+      setShowEditModal(false);
+    } else {
+      showToast(json.error || 'Erro ao atualizar site', 'error');
+    }
+  };
+
+  const handleSslUpdate = (updatedSite: any) => {
+    setSites(prev => prev.map(s => s.id === updatedSite.id ? updatedSite : s));
+  };
+
   const handleImport = async (vhost: ExternalVhost) => {
     setImportingFile(vhost.fileName);
     try {
       const domain = vhost.domains[0] || vhost.fileName;
 
-      // Try to extract proxy port if applicable
       let proxyPort: number | undefined;
       if (vhost.proxyPass) {
         const match = vhost.proxyPass.match(/:(\d+)/);
@@ -175,7 +259,7 @@ export default function NginxPage() {
           </div>
         </div>
 
-        {/* Tabs (only show when external vhosts exist) */}
+        {/* Tabs */}
         {externalVhosts.length > 0 && (
           <div className="flex gap-1 bg-[var(--bg-secondary)] rounded-lg p-1 w-fit">
             <button
@@ -213,24 +297,106 @@ export default function NginxPage() {
               <div className="grid gap-4">
                 {sites.map(site => (
                   <Card key={site.id}>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <h3 className="text-lg font-semibold text-[var(--text-primary)]">{site.domain}</h3>
-                          <Badge variant={site.enabled ? 'success' : 'danger'}>{site.enabled ? 'Ativo' : 'Inativo'}</Badge>
-                          {renderTypeBadge(site.type)}
-                          {site.ssl && <Badge variant="info">SSL</Badge>}
-                        </div>
-                        <div className="text-sm text-[var(--text-muted)] space-x-4">
-                          {site.root && <span>Root: {site.root}</span>}
-                          {site.proxyPort && <span>Porta: {site.proxyPort}</span>}
-                          {site.websocket && <Badge variant="warning">WS</Badge>}
-                          {site.fileName && <span className="text-xs opacity-60">Arquivo: {site.fileName}</span>}
+                    <div className="space-y-3">
+                      {/* Top row: info + actions */}
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <h3 className="text-lg font-semibold text-[var(--text-primary)]">{site.domain}</h3>
+                            <Badge variant={site.enabled ? 'success' : 'danger'}>
+                              {site.enabled ? 'Ativo' : 'Inativo'}
+                            </Badge>
+                            {renderTypeBadge(site.type)}
+                            {site.ssl && <Badge variant="info">SSL</Badge>}
+                            {site.maintenance && <Badge variant="warning">Manutenção</Badge>}
+                          </div>
+                          <div className="text-sm text-[var(--text-muted)] space-x-4">
+                            {site.root && <span>Root: {site.root}</span>}
+                            {site.proxyPort && <span>Porta: {site.proxyPort}</span>}
+                            {site.websocket && <Badge variant="warning">WS</Badge>}
+                            {site.phpVersion && <span>PHP {site.phpVersion}</span>}
+                            {site.fileName && <span className="text-xs opacity-60">Arquivo: {site.fileName}</span>}
+                          </div>
+                          {site.aliases?.length > 0 && (
+                            <div className="text-xs text-[var(--text-muted)] mt-1">
+                              Aliases: {site.aliases.join(', ')}
+                            </div>
+                          )}
                         </div>
                       </div>
-                      <Button variant="danger" size="sm" onClick={() => handleDelete(site.id, site.domain)}>
-                        <HiOutlineTrash className="w-4 h-4" />
-                      </Button>
+
+                      {/* Action buttons row */}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {/* Edit */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEdit(site)}
+                          title="Editar configurações"
+                        >
+                          <HiOutlinePencilSquare className="w-3.5 h-3.5" />
+                          Editar
+                        </Button>
+
+                        {/* Toggle enable/disable */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggle(site)}
+                          disabled={togglingSite === site.id}
+                          title={site.enabled ? 'Desabilitar site' : 'Habilitar site'}
+                        >
+                          {togglingSite === site.id ? (
+                            <Spinner size="sm" />
+                          ) : site.enabled ? (
+                            <HiOutlinePower className="w-3.5 h-3.5 text-amber-400" />
+                          ) : (
+                            <HiOutlinePlay className="w-3.5 h-3.5 text-green-400" />
+                          )}
+                          {site.enabled ? 'Desabilitar' : 'Habilitar'}
+                        </Button>
+
+                        {/* Maintenance */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleToggleMaintenance(site)}
+                          disabled={maintenanceSite === site.id}
+                          title={site.maintenance ? 'Desativar modo manutenção' : 'Ativar modo manutenção'}
+                        >
+                          {maintenanceSite === site.id ? (
+                            <Spinner size="sm" />
+                          ) : (
+                            <HiOutlineWrench className={`w-3.5 h-3.5 ${site.maintenance ? 'text-amber-400' : ''}`} />
+                          )}
+                          {site.maintenance ? 'Manutenção ON' : 'Manutenção'}
+                        </Button>
+
+                        {/* SSL */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setEditingSite(site);
+                            setShowEditModal(true);
+                            // Focus SSL tab will happen via SiteEditModal
+                          }}
+                          title={site.ssl ? 'Gerenciar SSL' : 'Configurar SSL'}
+                        >
+                          <HiOutlineShieldCheck className={`w-3.5 h-3.5 ${site.ssl ? 'text-green-400' : ''}`} />
+                          SSL
+                        </Button>
+
+                        {/* Delete */}
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          onClick={() => handleDelete(site.id, site.domain)}
+                          title="Remover site"
+                        >
+                          <HiOutlineTrash className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   </Card>
                 ))}
@@ -310,6 +476,16 @@ export default function NginxPage() {
         )}
 
         <SiteForm open={showForm} onClose={() => setShowForm(false)} onSubmit={handleCreate} />
+
+        {editingSite && (
+          <SiteEditModal
+            open={showEditModal}
+            onClose={() => { setShowEditModal(false); setEditingSite(null); }}
+            onSubmit={handleEditSubmit}
+            site={editingSite}
+            onSslUpdate={handleSslUpdate}
+          />
+        )}
       </div>
     </AppLayout>
   );
