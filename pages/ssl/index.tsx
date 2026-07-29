@@ -135,14 +135,40 @@ export default function SslPage() {
     setFormChainPath('');
   };
 
+  const [importing, setImporting] = useState(false);
+
+  const handleImportExisting = async () => {
+    setImporting(true);
+    try {
+      const res = await fetch('/api/ssl/certificates/import', { method: 'POST' });
+      const json = await res.json();
+      if (json.success) {
+        const { imported, skipped, message } = json.data;
+        showToast(message, 'success');
+        if (imported > 0) fetchCerts();
+      } else {
+        showToast(json.error || 'Erro ao importar', 'error');
+      }
+    } catch {
+      showToast('Erro de conexão', 'error');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <AppLayout>
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-[var(--text-primary)]">SSL/TLS</h1>
-          <Button onClick={() => { resetForm(); setShowForm(true); }}>
-            <HiOutlinePlus className="w-4 h-4" /> Novo Certificado
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={handleImportExisting} disabled={importing}>
+              {importing ? 'Importando...' : 'Importar Existentes'}
+            </Button>
+            <Button onClick={() => { resetForm(); setShowForm(true); }}>
+              <HiOutlinePlus className="w-4 h-4" /> Novo Certificado
+            </Button>
+          </div>
         </div>
 
         {loading ? (
