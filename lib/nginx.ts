@@ -227,7 +227,8 @@ export function generateProxyConfig(domain: string, port: number, websocket: boo
 export function generateSslConfig(domain: string, certPath: string, keyPath: string, chainPath?: string, extraConfig?: NginxSiteConfig): string {
   const serverNames = [domain, ...(extraConfig?.aliases || [])].join(' ');
   let config = `server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name ${serverNames};
 
     ssl_certificate ${certPath};
@@ -251,6 +252,9 @@ export function generateSslConfig(domain: string, certPath: string, keyPath: str
     config += `
     add_header Strict-Transport-Security "max-age=${extraConfig.hstsMaxAge}; includeSubDomains" always;`;
   }
+
+  config += `
+}`;
 
   return config;
 }
