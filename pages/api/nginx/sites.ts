@@ -181,13 +181,20 @@ function scanVhosts(): { managed: NginxSite[]; external: ParsedVhost[] } {
   return { managed: managedSites, external };
 }
 
-async function reloadNginx(res: NextApiResponse): Promise<boolean> {
+async function reloadNginx(): Promise<{ success: boolean; error?: string }> {
   const testResult = await executeCommand('nginx_test');
   if (testResult.code !== 0) {
-    return false;
+    const errOutput = testResult.stderr || testResult.stdout || 'Erro desconhecido no nginx -t';
+    // Clean and truncate the error message
+    const cleanError = errOutput
+      .replace(/nginx: (\[warn\]|\[emerg\]|\[alert\]|\[crit\]|\[error\])?\s*/g, '')
+      .replace(/\n+/g, ' | ')
+      .trim()
+      .substring(0, 500);
+    return { success: false, error: cleanError };
   }
   await executeCommand('nginx_reload');
-  return true;
+  return { success: true };
 }
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
@@ -290,14 +297,14 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         fs.symlinkSync(configPath, enabledPath);
       }
 
-      const reloaded = await reloadNginx(res);
-      if (!reloaded) {
+      const reloaded = await reloadNginx();
+      if (!reloaded.success) {
         // Rollback
         if (fs.existsSync(enabledPath)) fs.unlinkSync(enabledPath);
         if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
         return res.status(400).json({
           success: false,
-          error: 'Configuração NGINX inválida. Verifique os parâmetros.',
+          error: 'Configuração NGINX inválida: ' + (reloaded.error || 'erro desconhecido'),
         });
       }
 
@@ -345,11 +352,11 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       const configContent = writeNginxConfig(site);
       fs.writeFileSync(site.configPath, configContent);
 
-      const reloaded = await reloadNginx(res);
-      if (!reloaded) {
+      const reloaded = await reloadNginx();
+      if (!reloaded.success) {
         return res.status(400).json({
           success: false,
-          error: 'Configuração NGINX inválida após atualização.',
+          error: 'NGINX rejeitou a configuração: ' + (reloaded.error || 'erro desconhecido'),
         });
       }
 
@@ -458,8 +465,8 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           }
 
           // Nginx config already has the try_files prefix; just reload
-          const maintReloaded = await reloadNginx(res);
-          if (!maintReloaded) {
+          const maintReloaded = await reloadNginx();
+          if (!maintReloaded.success) {
             // Revert maintenance file
             site.maintenance = !site.maintenance;
             if (site.maintenance) {
@@ -469,7 +476,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
             }
             return res.status(400).json({
               success: false,
-              error: 'Falha ao recarregar NGINX no modo manutenção.',
+              error: 'NGINX rejeitou: ' + (maintReloaded.error || 'erro desconhecido'),
             });
           }
 
@@ -584,8 +591,8 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           const sslConfigContent = writeNginxConfig(site);
           fs.writeFileSync(site.configPath, sslConfigContent);
 
-          const sslReloaded = await reloadNginx(res);
-          if (!sslReloaded) {
+          const sslReloaded = await reloadNginx();
+          if (!sslReloaded.success) {
             site.ssl = false;
             site.sslCertPath = undefined;
             site.sslKeyPath = undefined;
@@ -596,7 +603,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
             await executeCommand('nginx_reload');
             return res.status(400).json({
               success: false,
-              error: 'Configuração NGINX inválida com SSL. Verifique os certificados.',
+              error: 'NGINX rejeitou config SSL: ' + (sslReloaded.error || 'verifique os certificados'),
             });
           }
 
@@ -620,11 +627,11 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           const noSslConfig = writeNginxConfig(site);
           fs.writeFileSync(site.configPath, noSslConfig);
 
-          const noSslReloaded = await reloadNginx(res);
-          if (!noSslReloaded) {
+          const noSslReloaded = await reloadNginx();
+          if (!noSslReloaded.success) {
             return res.status(400).json({
               success: false,
-              error: 'Erro ao aplicar configuração sem SSL.',
+              error: 'NGINX rejeitou: ' + (noSslReloaded.error || 'erro ao remover SSL'),
             });
           }
 
@@ -649,11 +656,11 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           fs.writeFileSync(site.configPath, configContent);
 
           // Test and reload
-          const rawReloaded = await reloadNginx(res);
-          if (!rawReloaded) {
+          const rawReloaded = await reloadNginx();
+          if (!rawReloaded.success) {
             return res.status(400).json({
               success: false,
-              error: 'Configuração NGINX inválida. Corrija os erros e tente novamente.',
+              error: 'NGINX rejeitou: ' + (rawReloaded.error || 'erro de sintaxe'),
             });
           }
 
