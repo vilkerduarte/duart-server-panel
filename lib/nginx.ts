@@ -227,7 +227,7 @@ export function generateProxyConfig(domain: string, port: number, websocket: boo
 export function generateSslConfig(domain: string, certPath: string, keyPath: string, chainPath?: string, extraConfig?: NginxSiteConfig): string {
   const serverNames = [domain, ...(extraConfig?.aliases || [])].join(' ');
   let config = `server {
-    listen ${extraConfig?.listenPort || 443} ssl http2;
+    listen 443 ssl http2;
     server_name ${serverNames};
 
     ssl_certificate ${certPath};
