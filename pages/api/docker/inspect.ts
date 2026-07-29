@@ -60,10 +60,12 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
     } catch {}
 
     // Get container logs
-    let logs = '';
+    let logs: string | null = null;
     try {
-      const logsResult = await executeRaw(`docker logs --tail 500 ${containerId} 2>&1`, 10000);
-      logs = logsResult.stdout || logsResult.stderr || '';
+      const logsResult = await executeRaw(`docker logs --tail 500 ${containerId} 2>&1`, 15000);
+      if (logsResult.stdout || logsResult.stderr) {
+        logs = logsResult.stdout || logsResult.stderr || '';
+      }
     } catch {}
 
     return res.status(200).json({

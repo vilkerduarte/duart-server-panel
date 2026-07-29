@@ -3,6 +3,7 @@ import { useAuth } from '@/lib/contexts/AuthContext';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
 import Spinner from '@/components/ui/Spinner';
+import { HiOutlineComputerDesktop } from 'react-icons/hi2';
 
 export default function LoginScreen() {
   const { login, setupAdmin, needsSetup, isLoading } = useAuth();
@@ -54,7 +55,7 @@ export default function LoginScreen() {
     <div className="min-h-screen flex items-center justify-center bg-[var(--bg-primary)] p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="text-4xl mb-3">🖥️</div>
+          <HiOutlineComputerDesktop className="w-12 h-12 mx-auto mb-3 text-blue-400" />
           <h1 className="text-2xl font-bold text-[var(--text-primary)]">Duart Panel</h1>
           <p className="text-sm text-[var(--text-muted)] mt-1">Painel de Gerenciamento de Servidores</p>
         </div>

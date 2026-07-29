@@ -6,7 +6,11 @@ import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import {
   HiOutlinePlus, HiOutlineFolderPlus, HiOutlineArrowDownTray,
   HiOutlineTrash, HiOutlinePencilSquare, HiOutlineArrowUpTray,
-  HiOutlineXMark, HiOutlineCheck
+  HiOutlineXMark, HiOutlineCheck, HiOutlineArrowPath,
+  HiOutlineFolder, HiOutlineLink, HiOutlineCodeBracket,
+  HiOutlineDocumentText, HiOutlinePhoto, HiOutlineArchiveBox,
+  HiOutlineBolt, HiOutlineDocument, HiOutlineGlobeAlt,
+  HiOutlineFolderOpen,
 } from 'react-icons/hi2';
 
 interface FileItem {
@@ -198,24 +202,25 @@ export default function FileBrowser({ currentPath, parentPath, items, onNavigate
   }, [currentPath]);
 
   const getIcon = (type: string) => {
-    if (type === 'directory') return '📁';
-    if (type === 'symlink') return '🔗';
+    const cls = 'w-4 h-4 text-[var(--text-muted)]';
+    if (type === 'directory') return <HiOutlineFolder className={`${cls} text-amber-400`} />;
+    if (type === 'symlink') return <HiOutlineLink className={`${cls} text-cyan-400`} />;
     const ext = type?.split('.').pop()?.toLowerCase();
-    if (['js', 'ts', 'jsx', 'tsx', 'py', 'rb', 'php'].includes(ext || '')) return '📜';
-    if (['json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf'].includes(ext || '')) return '📋';
-    if (['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico'].includes(ext || '')) return '🖼️';
-    if (['zip', 'tar', 'gz', 'rar', '7z'].includes(ext || '')) return '📦';
-    if (['sh', 'bash', 'zsh'].includes(ext || '')) return '⚡';
-    if (['md', 'txt', 'log'].includes(ext || '')) return '📝';
-    if (['html', 'css', 'scss', 'less'].includes(ext || '')) return '🌐';
-    return '📄';
+    if (['js', 'ts', 'jsx', 'tsx', 'py', 'rb', 'php'].includes(ext || '')) return <HiOutlineCodeBracket className={`${cls} text-yellow-400`} />;
+    if (['json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf'].includes(ext || '')) return <HiOutlineDocumentText className={`${cls} text-blue-400`} />;
+    if (['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'ico'].includes(ext || '')) return <HiOutlinePhoto className={`${cls} text-purple-400`} />;
+    if (['zip', 'tar', 'gz', 'rar', '7z'].includes(ext || '')) return <HiOutlineArchiveBox className={`${cls} text-orange-400`} />;
+    if (['sh', 'bash', 'zsh'].includes(ext || '')) return <HiOutlineBolt className={`${cls} text-green-400`} />;
+    if (['md', 'txt', 'log'].includes(ext || '')) return <HiOutlineDocument className={`${cls} text-gray-400`} />;
+    if (['html', 'css', 'scss', 'less'].includes(ext || '')) return <HiOutlineGlobeAlt className={`${cls} text-sky-400`} />;
+    return <HiOutlineDocument className={cls} />;
   };
 
   return (
     <div>
       {/* Toolbar */}
       <div className="flex items-center gap-2 mb-3 flex-wrap">
-        <Button size="sm" variant="ghost" onClick={onRefresh}>🔄 Atualizar</Button>
+        <Button size="sm" variant="ghost" onClick={onRefresh}><HiOutlineArrowPath className="w-4 h-4" /> Atualizar</Button>
         <Button size="sm" variant="ghost" onClick={() => setShowNewFolder(!showNewFolder)}>
           <HiOutlineFolderPlus className="w-4 h-4" /> Nova Pasta
         </Button>
@@ -268,7 +273,7 @@ export default function FileBrowser({ currentPath, parentPath, items, onNavigate
       {uploading && (
         <div className="mb-3">
           <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)] mb-1">
-            <span className="animate-pulse">⬆️</span> Enviando... {uploadProgress}%
+            <HiOutlineArrowUpTray className="w-4 h-4 animate-pulse" /> Enviando... {uploadProgress}%
           </div>
           <div className="w-full bg-[var(--bg-secondary)] rounded-full h-2 overflow-hidden">
             <div
@@ -321,7 +326,7 @@ export default function FileBrowser({ currentPath, parentPath, items, onNavigate
         {dragOver && (
           <div className="absolute inset-0 z-10 bg-blue-500/10 rounded-xl flex items-center justify-center border-2 border-dashed border-blue-400">
             <div className="text-center">
-              <p className="text-4xl mb-2">📂</p>
+              <HiOutlineFolderOpen className="w-12 h-12 mx-auto mb-2 text-blue-400" />
               <p className="text-blue-400 font-semibold">Solte os arquivos aqui</p>
               <p className="text-xs text-[var(--text-muted)]">Pastas inteiras serão preservadas</p>
             </div>
@@ -348,7 +353,7 @@ export default function FileBrowser({ currentPath, parentPath, items, onNavigate
                     onClick={() => onNavigate(parentPath!)}
                   >
                     <td className="p-3"></td>
-                    <td className="p-3 flex items-center gap-2 text-sm">📁 ..</td>
+                    <td className="p-3 flex items-center gap-2 text-sm"><HiOutlineFolder className="w-4 h-4 text-amber-400" /> ..</td>
                     <td className="p-3 text-sm text-[var(--text-muted)]">-</td>
                     <td className="p-3 text-sm text-[var(--text-muted)]">-</td>
                     <td className="p-3 text-sm text-[var(--text-muted)]">-</td>

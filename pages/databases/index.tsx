@@ -4,6 +4,7 @@ import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import DbStatusCard from '@/components/databases/DbStatusCard';
 import { HiOutlineServerStack } from 'react-icons/hi2';
+import { SiMysql, SiPostgresql, SiMongodb } from 'react-icons/si';
 
 const DB_TYPES = ['mysql', 'postgresql', 'mongodb'] as const;
 const DB_NAMES: Record<string, string> = {
@@ -11,10 +12,10 @@ const DB_NAMES: Record<string, string> = {
   postgresql: 'PostgreSQL',
   mongodb: 'MongoDB',
 };
-const DB_ICONS: Record<string, string> = {
-  mysql: '🐬',
-  postgresql: '🐘',
-  mongodb: '🍃',
+const DB_ICONS: Record<string, React.ReactNode> = {
+  mysql: <SiMysql className="w-5 h-5" />,
+  postgresql: <SiPostgresql className="w-5 h-5" />,
+  mongodb: <SiMongodb className="w-5 h-5" />,
 };
 
 export default function DatabasesPage() {

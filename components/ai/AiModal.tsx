@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { HiOutlinePaperAirplane, HiOutlineXMark, HiOutlineTrash, HiOutlinePlay, HiOutlineShieldCheck } from 'react-icons/hi2';
+import { HiOutlinePaperAirplane, HiOutlineXMark, HiOutlineTrash, HiOutlinePlay, HiOutlineShieldCheck, HiOutlineSparkles } from 'react-icons/hi2';
+import Spinner from '@/components/ui/Spinner';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -222,7 +223,10 @@ export default function AiModal({ open, onClose }: AiModalProps) {
       <div className="relative w-full max-w-2xl h-[85vh] bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl shadow-2xl flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-color)] shrink-0">
-          <h2 className="text-lg font-semibold text-[var(--text-primary)]">🤖 Assistente IA</h2>
+          <h2 className="text-lg font-semibold text-[var(--text-primary)] flex items-center gap-2">
+            <HiOutlineSparkles className="w-5 h-5 text-blue-400" />
+            Assistente IA
+          </h2>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setMessages([messages[0]])}
@@ -266,8 +270,8 @@ export default function AiModal({ open, onClose }: AiModalProps) {
 
           {streaming && (
             <div className="flex justify-start">
-              <div className="bg-[var(--bg-secondary)] rounded-lg px-4 py-3 text-sm text-[var(--text-muted)] border border-[var(--border-color)]">
-                <span className="animate-pulse inline-block">●</span> Processando...
+              <div className="bg-[var(--bg-secondary)] rounded-lg px-4 py-3 text-sm text-[var(--text-muted)] border border-[var(--border-color)] flex items-center gap-2">
+                <Spinner size="sm" /> Processando...
               </div>
             </div>
           )}

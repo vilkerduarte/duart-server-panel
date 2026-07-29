@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import Badge from '@/components/ui/Badge';
-import { HiOutlineXMark, HiOutlinePlay, HiOutlineStop, HiOutlineArrowPath } from 'react-icons/hi2';
+import { HiOutlineXMark, HiOutlinePlay, HiOutlineStop, HiOutlineArrowPath, HiOutlineInformationCircle, HiOutlineGlobeAlt, HiOutlineCircleStack, HiOutlineDocumentText, HiOutlineArchiveBox } from 'react-icons/hi2';
+import { SiDocker } from 'react-icons/si';
 
 interface ContainerDetailModalProps {
   containerId: string;
@@ -42,11 +43,11 @@ export default function ContainerDetailModal({
   const logs = data?.logs;
 
   const tabs = [
-    { key: 'info' as const, label: '📋 Informações' },
-    { key: 'network' as const, label: '🌐 Rede' },
-    { key: 'volumes' as const, label: '💾 Volumes' },
-    { key: 'compose' as const, label: '🐳 Compose' },
-    { key: 'logs' as const, label: '📜 Logs' },
+    { key: 'info' as const, icon: <HiOutlineInformationCircle className="w-4 h-4" />, label: 'Informações' },
+    { key: 'network' as const, icon: <HiOutlineGlobeAlt className="w-4 h-4" />, label: 'Rede' },
+    { key: 'volumes' as const, icon: <HiOutlineCircleStack className="w-4 h-4" />, label: 'Volumes' },
+    { key: 'compose' as const, icon: <SiDocker className="w-4 h-4" />, label: 'Compose' },
+    { key: 'logs' as const, icon: <HiOutlineDocumentText className="w-4 h-4" />, label: 'Logs' },
   ];
 
   return (
@@ -93,7 +94,10 @@ export default function ContainerDetailModal({
                   : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
               }`}
             >
-              {tab.label}
+              <span className="flex items-center gap-1.5">
+                {tab.icon}
+                {tab.label}
+              </span>
             </button>
           ))}
         </div>
@@ -221,7 +225,7 @@ export default function ContainerDetailModal({
                     </div>
                   ) : (
                     <div className="text-center py-12">
-                      <p className="text-[var(--text-muted)] text-lg mb-2">📦</p>
+                      <HiOutlineArchiveBox className="w-12 h-12 mx-auto mb-2 text-[var(--text-muted)]" />
                       <p className="text-[var(--text-muted)]">
                         Nenhum arquivo docker-compose.yml encontrado para este container.
                       </p>
@@ -235,12 +239,24 @@ export default function ContainerDetailModal({
 
               {activeTab === 'logs' && (
                 <div>
-                  {logs ? (
-                    <pre className="text-xs font-mono text-[var(--text-secondary)] bg-[var(--bg-secondary)] p-4 rounded-lg overflow-auto max-h-[50vh] whitespace-pre-wrap">
-                      {logs}
-                    </pre>
+                  {logs !== null && logs !== undefined ? (
+                    logs.length > 0 ? (
+                      <pre className="text-xs font-mono text-[var(--text-secondary)] bg-[var(--bg-secondary)] p-4 rounded-lg overflow-auto max-h-[50vh] whitespace-pre-wrap">
+                        {logs}
+                      </pre>
+                    ) : (
+                      <div className="text-center py-12">
+                        <HiOutlineDocumentText className="w-12 h-12 mx-auto mb-2 text-[var(--text-muted)]" />
+                        <p className="text-[var(--text-muted)]">Nenhum log disponível para este container.</p>
+                        <p className="text-xs text-[var(--text-muted)] mt-1">O container pode não ter gerado logs ainda.</p>
+                      </div>
+                    )
                   ) : (
-                    <p className="text-center text-[var(--text-muted)] py-12">Logs indisponíveis</p>
+                    <div className="text-center py-12">
+                      <HiOutlineDocumentText className="w-12 h-12 mx-auto mb-2 text-red-400/50" />
+                      <p className="text-[var(--text-muted)]">Falha ao carregar logs.</p>
+                      <p className="text-xs text-[var(--text-muted)] mt-1">Verifique se o Docker está rodando e se o container existe.</p>
+                    </div>
                   )}
                 </div>
               )}
