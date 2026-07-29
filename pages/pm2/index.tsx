@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { HiOutlineCommandLine, HiOutlinePlay, HiOutlineBookmark, HiOutlineTrash } from 'react-icons/hi2';
+import AppLayout from '@/components/Layout/AppLayout';
 import ProcessCard from '@/components/pm2/ProcessCard';
 import ProcessLogs from '@/components/pm2/ProcessLogs';
 import StartAppForm from '@/components/pm2/StartAppForm';
@@ -160,6 +161,7 @@ export default function Pm2Page() {
   };
 
   return (
+    <AppLayout>
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -316,5 +318,6 @@ export default function Pm2Page() {
         variant="danger"
       />
     </div>
+    </AppLayout>
   );
 }
