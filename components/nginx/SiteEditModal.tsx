@@ -4,6 +4,7 @@ import Input from '@/components/ui/Input';
 import Select from '@/components/ui/Select';
 import Modal from '@/components/ui/Modal';
 import SslConfigModal from './SslConfigModal';
+import { useToast } from '@/lib/contexts/ToastContext';
 
 interface SiteEditModalProps {
   open: boolean;
@@ -16,9 +17,15 @@ interface SiteEditModalProps {
 type TabKey = 'general' | 'php' | 'ssl' | 'security' | 'advanced';
 
 export default function SiteEditModal({ open, onClose, onSubmit, site, onSslUpdate }: SiteEditModalProps) {
+  const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<TabKey>('general');
   const [showSslModal, setShowSslModal] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Raw config editor
+  const [rawConfig, setRawConfig] = useState('');
+  const [loadingRaw, setLoadingRaw] = useState(false);
+  const [savingRaw, setSavingRaw] = useState(false);
 
   // General
   const [domain, setDomain] = useState('');
@@ -329,6 +336,90 @@ export default function SiteEditModal({ open, onClose, onSubmit, site, onSslUpda
                 />
               </div>
               <div className="text-xs text-[var(--text-muted)]">Estas diretivas serão inseridas dentro do bloco server {'{ }'}.</div>
+
+              {/* Raw Config Editor */}
+              <div className="border-t border-[var(--border-color)] pt-3" />
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-[var(--text-secondary)]">
+                    Editar Configuração Raw
+                  </label>
+                  <div className="flex gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={async () => {
+                          setLoadingRaw(true);
+                          try {
+                            const res = await fetch(`/api/nginx/sites?id=${site.id}&raw=true`);
+                            const json = await res.json();
+                            if (json.success && json.data) {
+                              if (json.data.rawConfig) {
+                                setRawConfig(json.data.rawConfig);
+                              } else {
+                                setRawConfig('# Não foi possível carregar a configuração.\n# Arquivo: ' + (json.data.configPath || 'desconhecido'));
+                              }
+                            }
+                          } catch {
+                            showToast('Erro ao carregar configuração', 'error');
+                          } finally {
+                            setLoadingRaw(false);
+                          }
+                        }}
+                      disabled={loadingRaw}
+                    >
+                      {loadingRaw ? 'Carregando...' : 'Carregar Config Atual'}
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={async () => {
+                        if (!rawConfig.trim()) {
+                          showToast('A configuração está vazia', 'error');
+                          return;
+                        }
+                        setSavingRaw(true);
+                        try {
+                          const res = await fetch('/api/nginx/sites', {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              id: site.id,
+                              action: 'raw_config',
+                              configContent: rawConfig,
+                            }),
+                          });
+                          const json = await res.json();
+                          if (json.success) {
+                            showToast('Configuração salva e NGINX recarregado!', 'success');
+                          } else {
+                            showToast(json.error || 'Erro na configuração NGINX', 'error');
+                          }
+                        } catch {
+                          showToast('Erro de conexão', 'error');
+                        } finally {
+                          setSavingRaw(false);
+                        }
+                      }}
+                      disabled={savingRaw || !rawConfig.trim()}
+                      loading={savingRaw}
+                    >
+                      Salvar & Recarregar NGINX
+                    </Button>
+                  </div>
+                </div>
+                <textarea
+                  value={rawConfig}
+                  onChange={e => setRawConfig(e.target.value)}
+                  placeholder="Cole ou edite a configuração completa do NGINX aqui..."
+                  rows={16}
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-amber-500/30 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-amber-500 font-mono resize-y"
+                  spellCheck={false}
+                />
+                <div className="text-xs text-amber-400/80 bg-amber-400/5 border border-amber-400/10 rounded-lg p-2">
+                  ⚠️ Atenção: Alterações manuais substituem completamente o arquivo de configuração. Certifique-se de que a sintaxe NGINX está correta antes de salvar. O NGINX será testado e recarregado automaticamente.
+                </div>
+              </div>
             </div>
           )}
 

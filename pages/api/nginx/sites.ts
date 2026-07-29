@@ -6,6 +6,8 @@ import {
   ParsedVhost,
   generateSiteConfig,
   getDefaultMaintenancePage,
+  getMaintenanceFilePath,
+  MAINTENANCE_DIR,
   NginxSiteConfig,
 } from '@/lib/nginx';
 import fs from 'fs';
@@ -81,6 +83,13 @@ function readCertificates() {
   } catch {
     return [];
   }
+}
+
+function writeCertificatesJson(certificates: any[]) {
+  if (!fs.existsSync(SSL_DIR)) {
+    fs.mkdirSync(SSL_DIR, { recursive: true });
+  }
+  fs.writeFileSync(CERTS_FILE, JSON.stringify({ certificates }, null, 2));
 }
 
 function writeNginxConfig(site: NginxSite): string {
@@ -187,13 +196,25 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
     if (req.method === 'GET') {
       const { scan, id } = req.query;
 
-      // Get single site
+      // Get single site (optionally with raw config content)
       if (id && typeof id === 'string') {
         const data = readSites();
         const site = data.sites.find((s: NginxSite) => s.id === id);
         if (!site) {
           return res.status(404).json({ success: false, error: 'Site não encontrado' });
         }
+
+        // If raw=true, include the actual config file content
+        if (req.query.raw === 'true') {
+          let rawContent = '';
+          try {
+            if (fs.existsSync(site.configPath)) {
+              rawContent = fs.readFileSync(site.configPath, 'utf-8');
+            }
+          } catch {}
+          return res.status(200).json({ success: true, data: { ...site, rawConfig: rawContent } });
+        }
+
         return res.status(200).json({ success: true, data: site });
       }
 
@@ -420,20 +441,35 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         case 'maintenance': {
           site.maintenance = !site.maintenance;
 
-          // Regenerate config
-          const configContent = writeNginxConfig(site);
-          fs.writeFileSync(site.configPath, configContent);
+          // Write/remove maintenance HTML file on disk
+          const maintFilePath = getMaintenanceFilePath(site.domain);
+          if (site.maintenance) {
+            // Ensure directory exists and write file
+            if (!fs.existsSync(MAINTENANCE_DIR)) {
+              fs.mkdirSync(MAINTENANCE_DIR, { recursive: true });
+            }
+            const maintHtml = params.customHtml || getDefaultMaintenancePage(site.domain);
+            fs.writeFileSync(maintFilePath, maintHtml);
+          } else {
+            // Remove maintenance file
+            if (fs.existsSync(maintFilePath)) {
+              fs.unlinkSync(maintFilePath);
+            }
+          }
 
-          const reloaded = await reloadNginx(res);
-          if (!reloaded) {
-            // Revert
+          // Nginx config already has the try_files prefix; just reload
+          const maintReloaded = await reloadNginx(res);
+          if (!maintReloaded) {
+            // Revert maintenance file
             site.maintenance = !site.maintenance;
-            const revertContent = writeNginxConfig(site);
-            fs.writeFileSync(site.configPath, revertContent);
-            await executeCommand('nginx_reload');
+            if (site.maintenance) {
+              fs.writeFileSync(maintFilePath, params.customHtml || getDefaultMaintenancePage(site.domain));
+            } else {
+              if (fs.existsSync(maintFilePath)) fs.unlinkSync(maintFilePath);
+            }
             return res.status(400).json({
               success: false,
-              error: 'Configuração NGINX inválida com modo manutenção.',
+              error: 'Falha ao recarregar NGINX no modo manutenção.',
             });
           }
 
@@ -487,6 +523,37 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
             site.sslCertPath = path.join(letsencryptDir, 'fullchain.pem');
             site.sslKeyPath = path.join(letsencryptDir, 'privkey.pem');
             site.sslChainPath = null;
+
+            // Auto-register certificate in the SSL certificates list
+            try {
+              const sslCertId = require('uuid').v4();
+              const sslCerts = readCertificates();
+              const alreadyExists = sslCerts.some((c: any) =>
+                c.domains.includes(site.domain) && c.type === 'letsencrypt'
+              );
+              if (!alreadyExists) {
+                sslCerts.push({
+                  id: sslCertId,
+                  domains: site.aliases ? [site.domain, ...site.aliases] : [site.domain],
+                  type: 'letsencrypt',
+                  method: 'http',
+                  issuer: "Let's Encrypt",
+                  validFrom: new Date().toISOString(),
+                  validUntil: new Date(Date.now() + 90 * 86400000).toISOString(),
+                  certPath: path.join(letsencryptDir, 'fullchain.pem'),
+                  keyPath: path.join(letsencryptDir, 'privkey.pem'),
+                  chainPath: null,
+                  autoRenew: true,
+                  renewDaysBefore: 5,
+                  associatedSites: [site.domain],
+                  createdAt: new Date().toISOString(),
+                });
+                writeCertificatesJson(sslCerts);
+                site.sslCertId = sslCertId;
+              }
+            } catch {
+              // Non-fatal: certificate issued but registration in list failed
+            }
           }
           // Case 2: Use existing certificate by ID
           else if (certId) {
@@ -567,6 +634,32 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           return res.status(200).json({
             success: true,
             data: { site, action: 'ssl_remove', ssl: false, nginxReloaded: true },
+          });
+        }
+
+        // Save raw NGINX configuration manually
+        case 'raw_config': {
+          const { configContent } = params;
+
+          if (!configContent || typeof configContent !== 'string' || configContent.trim().length === 0) {
+            return res.status(400).json({ success: false, error: 'Conteúdo da configuração é obrigatório' });
+          }
+
+          // Write the raw config directly
+          fs.writeFileSync(site.configPath, configContent);
+
+          // Test and reload
+          const rawReloaded = await reloadNginx(res);
+          if (!rawReloaded) {
+            return res.status(400).json({
+              success: false,
+              error: 'Configuração NGINX inválida. Corrija os erros e tente novamente.',
+            });
+          }
+
+          return res.status(200).json({
+            success: true,
+            data: { site, action: 'raw_config', nginxReloaded: true },
           });
         }
 

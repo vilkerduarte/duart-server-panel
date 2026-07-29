@@ -18,6 +18,9 @@ interface NginxSite {
   websocket: boolean;
   phpVersion: string | null;
   ssl: boolean;
+  sslCertPath: string | null;
+  sslKeyPath: string | null;
+  sslChainPath: string | null;
   enabled: boolean;
   configPath: string;
   fileName: string | null;
@@ -48,7 +51,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
   }
 
   try {
-    const { fileName, domain, type, root, proxyPort, websocket } = req.body;
+    const { fileName, domain, type, root, proxyPort, websocket, ssl, sslCertPath, sslKeyPath, sslChainPath } = req.body;
 
     if (!fileName) {
       return res.status(400).json({ success: false, error: 'fileName é obrigatório' });
@@ -108,7 +111,10 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       proxyUrl: null,
       websocket: !!websocket,
       phpVersion: null,
-      ssl: false,
+      ssl: !!ssl,
+      sslCertPath: sslCertPath || null,
+      sslKeyPath: sslKeyPath || null,
+      sslChainPath: sslChainPath || null,
       enabled: true,
       configPath,
       fileName,

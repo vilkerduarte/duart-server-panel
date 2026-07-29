@@ -123,19 +123,10 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           });
         }
 
-        // Determine cert paths from certbot output
+        // Determine cert paths from certbot output - use REAL Let's Encrypt paths
         const letsencryptDir = `/etc/letsencrypt/live/${domains[0]}`;
         const finalCertPath = path.join(letsencryptDir, 'fullchain.pem');
         const finalKeyPath = path.join(letsencryptDir, 'privkey.pem');
-
-        // Create symlinks in our managed directory
-        fs.mkdirSync(certDir, { recursive: true });
-        if (fs.existsSync(finalCertPath)) {
-          fs.symlinkSync(finalCertPath, path.join(certDir, 'fullchain.pem'));
-        }
-        if (fs.existsSync(finalKeyPath)) {
-          fs.symlinkSync(finalKeyPath, path.join(certDir, 'privkey.pem'));
-        }
 
         const cert: Certificate = {
           id,
@@ -145,8 +136,8 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           issuer: 'Let\'s Encrypt',
           validFrom: new Date().toISOString(),
           validUntil: new Date(Date.now() + 90 * 86400000).toISOString(),
-          certPath: path.join(certDir, 'fullchain.pem'),
-          keyPath: path.join(certDir, 'privkey.pem'),
+          certPath: finalCertPath,
+          keyPath: finalKeyPath,
           chainPath: null,
           autoRenew: true,
           renewDaysBefore: 5,

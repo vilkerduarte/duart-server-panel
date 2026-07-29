@@ -28,6 +28,9 @@ interface ExternalVhost {
   panelId: string | null;
   listenPorts: string[];
   ssl: boolean;
+  sslCertPath: string | null;
+  sslKeyPath: string | null;
+  sslChainPath: string | null;
   rawConfigPreview: string;
 }
 
@@ -201,6 +204,10 @@ export default function NginxPage() {
         root: vhost.root,
         proxyPort,
         websocket: vhost.websocket,
+        ssl: vhost.ssl,
+        sslCertPath: vhost.sslCertPath,
+        sslKeyPath: vhost.sslKeyPath,
+        sslChainPath: vhost.sslChainPath,
       };
 
       const res = await fetch('/api/nginx/sites/import', {

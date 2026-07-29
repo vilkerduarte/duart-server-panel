@@ -30,10 +30,20 @@ interface ExistingCert {
   chainPath: string | null;
 }
 
+const SSL_PROGRESS_STEPS = [
+  { key: 'validating', label: 'Validando domínio e configurações...' },
+  { key: 'issuing', label: 'Emitindo certificado SSL (isso pode levar até 2 minutos)...' },
+  { key: 'configuring', label: 'Aplicando certificado na configuração NGINX...' },
+  { key: 'testing', label: 'Testando configuração NGINX...' },
+  { key: 'reloading', label: 'Recarregando NGINX...' },
+];
+
 export default function SslConfigModal({ open, onClose, site, onConfigured }: SslConfigModalProps) {
   const { showToast } = useToast();
   const [method, setMethod] = useState<SslMethod>('letsencrypt');
   const [loading, setLoading] = useState(false);
+  const [progressStep, setProgressStep] = useState('');
+  const [completedSteps, setCompletedSteps] = useState<string[]>([]);
 
   // Let's Encrypt
   const [email, setEmail] = useState('');
@@ -74,7 +84,11 @@ export default function SslConfigModal({ open, onClose, site, onConfigured }: Ss
     }
 
     setLoading(true);
+    setCompletedSteps([]);
+    setProgressStep('validating');
+
     try {
+      setProgressStep('issuing');
       const res = await fetch('/api/nginx/sites', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -84,8 +98,24 @@ export default function SslConfigModal({ open, onClose, site, onConfigured }: Ss
           email,
         }),
       });
+
+      setProgressStep('configuring');
+      setCompletedSteps(prev => [...prev, 'issuing']);
+
       const json = await res.json();
       if (json.success) {
+        setProgressStep('testing');
+        setCompletedSteps(prev => [...prev, 'configuring']);
+
+        // Brief pause to show progress
+        await new Promise(r => setTimeout(r, 400));
+
+        setProgressStep('reloading');
+        setCompletedSteps(prev => [...prev, 'testing']);
+
+        await new Promise(r => setTimeout(r, 300));
+        setCompletedSteps(prev => [...prev, 'reloading']);
+
         showToast('Certificado SSL emitido com sucesso!', 'success');
         onConfigured(json.data.site);
         onClose();
@@ -96,6 +126,7 @@ export default function SslConfigModal({ open, onClose, site, onConfigured }: Ss
       showToast('Erro de conexão', 'error');
     } finally {
       setLoading(false);
+      setProgressStep('');
     }
   };
 
@@ -354,11 +385,43 @@ export default function SslConfigModal({ open, onClose, site, onConfigured }: Ss
         )}
 
         {/* Footer */}
-        <div className="flex justify-end gap-3 pt-4 border-t border-[var(--border-color)]">
-          <Button variant="ghost" onClick={onClose}>Cancelar</Button>
-          <Button onClick={handleSubmit} loading={loading}>
-            {method === 'letsencrypt' ? 'Emitir Certificado' : 'Aplicar Certificado'}
-          </Button>
+        <div className="space-y-3 pt-4 border-t border-[var(--border-color)]">
+          {/* Progress indicator (Let's Encrypt only) */}
+          {loading && method === 'letsencrypt' && progressStep && (
+            <div className="space-y-2">
+              {SSL_PROGRESS_STEPS.map((step, idx) => {
+                const isDone = completedSteps.includes(step.key);
+                const isActive = progressStep === step.key;
+                return (
+                  <div key={step.key} className="flex items-center gap-2 text-xs">
+                    <span className={`w-4 h-4 flex items-center justify-center rounded-full text-[10px] font-bold ${
+                      isDone ? 'bg-green-500 text-white' :
+                      isActive ? 'bg-blue-500 text-white animate-pulse' :
+                      'bg-[var(--bg-secondary)] text-[var(--text-muted)]'
+                    }`}>
+                      {isDone ? '✓' : idx + 1}
+                    </span>
+                    <span className={isDone ? 'text-green-400' : isActive ? 'text-blue-400' : 'text-[var(--text-muted)]'}>
+                      {step.label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {loading && method !== 'letsencrypt' && (
+            <div className="text-center text-sm text-[var(--text-muted)] py-2">
+              Aplicando certificado...
+            </div>
+          )}
+
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={onClose} disabled={loading}>Cancelar</Button>
+            <Button onClick={handleSubmit} loading={loading}>
+              {method === 'letsencrypt' ? 'Emitir Certificado' : 'Aplicar Certificado'}
+            </Button>
+          </div>
         </div>
       </div>
     </Modal>

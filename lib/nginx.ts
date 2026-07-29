@@ -4,6 +4,8 @@
  * Also parses existing NGINX vhost files from the filesystem.
  */
 
+export const MAINTENANCE_DIR = '/var/lib/duart-panel/nginx/maintenance';
+
 export interface NginxSiteConfig {
   domain: string;
   type: 'static' | 'php' | 'proxy';
@@ -17,345 +19,32 @@ export interface NginxSiteConfig {
   sslKeyPath?: string;
   sslChainPath?: string;
   redirectHttp?: boolean;
-  /** Additional custom NGINX directives injected into the server block */
   customDirectives?: string;
-  /** Client max body size (e.g. "50m") */
   clientMaxBodySize?: string;
-  /** Enable gzip compression */
   gzip?: boolean;
-  /** Custom error page mapping: status -> path */
   errorPages?: Record<number, string>;
-  /** Rate limiting zone name */
   rateLimitZone?: string;
-  /** Rate limiting rate (e.g. "10r/s") */
   rateLimitRate?: string;
-  /** IP allow list */
   allowIps?: string[];
-  /** IP deny list */
   denyIps?: string[];
-  /** Basic auth user file path */
   authBasicFile?: string;
-  /** Basic auth realm message */
   authBasicRealm?: string;
-  /** SSL protocols override */
   sslProtocols?: string;
-  /** HSTS max age in seconds (0 = disabled) */
   hstsMaxAge?: number;
-  /** Custom listen port (default 80 or 443 for SSL) */
   listenPort?: number;
-  /** Server aliases (additional server_name entries) */
   aliases?: string[];
-  /** Access log path override */
   accessLogPath?: string;
-  /** Error log path override */
   errorLogPath?: string;
-  /** Maintenance mode: redirect all traffic to a static page */
   maintenance?: boolean;
-  /** Maintenance page HTML content */
   maintenancePage?: string;
-  /** Cache static assets duration (e.g. "30d") */
   cacheStaticDuration?: string;
 }
 
 /**
- * Generates a static site NGINX config.
+ * Returns the absolute path to the maintenance HTML file for a domain.
  */
-export function generateStaticConfig(domain: string, root: string, extraConfig?: NginxSiteConfig): string {
-  let config = `server {
-    listen ${extraConfig?.listenPort || 80};
-    server_name ${[domain, ...(extraConfig?.aliases || [])].join(' ')};
-    root ${root};
-    index index.html index.htm;`;
-
-  if (extraConfig?.clientMaxBodySize) {
-    config += `
-    client_max_body_size ${extraConfig.clientMaxBodySize};`;
-  }
-
-  if (extraConfig?.gzip !== false) {
-    config += `
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;`;
-  }
-
-  config += `
-
-    location / {
-        try_files $uri $uri/ =404;`;
-
-  if (extraConfig?.cacheStaticDuration) {
-    config += `
-        expires ${extraConfig.cacheStaticDuration};`;
-  }
-
-  config += `
-    }`;
-
-  // Maintenance mode
-  if (extraConfig?.maintenance) {
-    config += generateMaintenanceLocation(extraConfig);
-  }
-
-  // Rate limiting
-  if (extraConfig?.rateLimitZone && extraConfig?.rateLimitRate) {
-    config += `
-    location / {
-        limit_req zone=${extraConfig.rateLimitZone} burst=10 nodelay;
-        try_files $uri $uri/ =404;
-    }`;
-  }
-
-  // IP restrictions
-  if (extraConfig?.allowIps?.length || extraConfig?.denyIps?.length) {
-    config += `
-    # IP Access Control`;
-    for (const ip of extraConfig?.denyIps || []) {
-      config += `
-    deny ${ip};`;
-    }
-    for (const ip of extraConfig?.allowIps || []) {
-      config += `
-    allow ${ip};`;
-    }
-    if (extraConfig?.denyIps?.length && !extraConfig?.allowIps?.length) {
-      config += `
-    allow all;`;
-    }
-  }
-
-  // Basic auth
-  if (extraConfig?.authBasicFile) {
-    config += `
-    auth_basic "${extraConfig.authBasicRealm || 'Restricted Area'}";
-    auth_basic_user_file ${extraConfig.authBasicFile};`;
-  }
-
-  // Error pages
-  if (extraConfig?.errorPages) {
-    for (const [code, path] of Object.entries(extraConfig.errorPages)) {
-      config += `
-    error_page ${code} ${path};`;
-    }
-  }
-
-  // Custom directives
-  if (extraConfig?.customDirectives) {
-    config += `
-    ${extraConfig.customDirectives}`;
-  }
-
-  config += `
-
-    access_log ${extraConfig?.accessLogPath || `/var/log/nginx/${domain}.access.log`};
-    error_log ${extraConfig?.errorLogPath || `/var/log/nginx/${domain}.error.log`};
-}`;
-  return config;
-}
-
-/**
- * Generates a PHP-FPM NGINX config.
- */
-export function generatePhpConfig(domain: string, root: string, phpVersion: string = '8.3', extraConfig?: NginxSiteConfig): string {
-  let config = `server {
-    listen ${extraConfig?.listenPort || 80};
-    server_name ${[domain, ...(extraConfig?.aliases || [])].join(' ')};
-    root ${root};
-    index index.php index.html;`;
-
-  if (extraConfig?.clientMaxBodySize) {
-    config += `
-    client_max_body_size ${extraConfig.clientMaxBodySize};`;
-  }
-
-  if (extraConfig?.gzip !== false) {
-    config += `
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;`;
-  }
-
-  config += `
-
-    location / {
-        try_files $uri $uri/ /index.php?$query_string;`;
-
-  if (extraConfig?.cacheStaticDuration) {
-    config += `
-        expires ${extraConfig.cacheStaticDuration};`;
-  }
-
-  config += `
-    }`;
-
-  // Maintenance mode
-  if (extraConfig?.maintenance) {
-    config += generateMaintenanceLocation(extraConfig);
-  }
-
-  config += `
-
-    location ~ \\.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php${phpVersion}-fpm.sock;
-    }`;
-
-  // IP restrictions
-  if (extraConfig?.allowIps?.length || extraConfig?.denyIps?.length) {
-    config += `
-    # IP Access Control`;
-    for (const ip of extraConfig?.denyIps || []) {
-      config += `
-    deny ${ip};`;
-    }
-    for (const ip of extraConfig?.allowIps || []) {
-      config += `
-    allow ${ip};`;
-    }
-    if (extraConfig?.denyIps?.length && !extraConfig?.allowIps?.length) {
-      config += `
-    allow all;`;
-    }
-  }
-
-  // Basic auth
-  if (extraConfig?.authBasicFile) {
-    config += `
-    auth_basic "${extraConfig.authBasicRealm || 'Restricted Area'}";
-    auth_basic_user_file ${extraConfig.authBasicFile};`;
-  }
-
-  // Error pages
-  if (extraConfig?.errorPages) {
-    for (const [code, path] of Object.entries(extraConfig.errorPages)) {
-      config += `
-    error_page ${code} ${path};`;
-    }
-  }
-
-  // Custom directives
-  if (extraConfig?.customDirectives) {
-    config += `
-    ${extraConfig.customDirectives}`;
-  }
-
-  config += `
-
-    access_log ${extraConfig?.accessLogPath || `/var/log/nginx/${domain}.access.log`};
-    error_log ${extraConfig?.errorLogPath || `/var/log/nginx/${domain}.error.log`};
-}`;
-  return config;
-}
-
-/**
- * Generates a reverse proxy NGINX config.
- */
-export function generateProxyConfig(domain: string, port: number, websocket: boolean = false, extraConfig?: NginxSiteConfig): string {
-  let config = `server {
-    listen ${extraConfig?.listenPort || 80};
-    server_name ${[domain, ...(extraConfig?.aliases || [])].join(' ')};
-`;
-
-  if (extraConfig?.clientMaxBodySize) {
-    config += `    client_max_body_size ${extraConfig.clientMaxBodySize};\n`;
-  }
-
-  if (extraConfig?.gzip !== false) {
-    config += `    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
-`;
-  }
-
-  config += `
-    location / {
-        proxy_pass http://localhost:${port};
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;`;
-
-  if (websocket) {
-    config += `
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 86400;`;
-  }
-
-  config += `
-    }`;
-
-  // Maintenance mode
-  if (extraConfig?.maintenance) {
-    config += generateMaintenanceLocation(extraConfig);
-  }
-
-  // IP restrictions
-  if (extraConfig?.allowIps?.length || extraConfig?.denyIps?.length) {
-    config += `
-    # IP Access Control`;
-    for (const ip of extraConfig?.denyIps || []) {
-      config += `
-    deny ${ip};`;
-    }
-    for (const ip of extraConfig?.allowIps || []) {
-      config += `
-    allow ${ip};`;
-    }
-    if (extraConfig?.denyIps?.length && !extraConfig?.allowIps?.length) {
-      config += `
-    allow all;`;
-    }
-  }
-
-  // Basic auth
-  if (extraConfig?.authBasicFile) {
-    config += `
-    auth_basic "${extraConfig.authBasicRealm || 'Restricted Area'}";
-    auth_basic_user_file ${extraConfig.authBasicFile};`;
-  }
-
-  // Error pages
-  if (extraConfig?.errorPages) {
-    for (const [code, path] of Object.entries(extraConfig.errorPages)) {
-      config += `
-    error_page ${code} ${path};`;
-    }
-  }
-
-  // Custom directives
-  if (extraConfig?.customDirectives) {
-    config += `
-    ${extraConfig.customDirectives}`;
-  }
-
-  config += `
-
-    access_log ${extraConfig?.accessLogPath || `/var/log/nginx/${domain}.access.log`};
-    error_log ${extraConfig?.errorLogPath || `/var/log/nginx/${domain}.error.log`};
-}`;
-  return config;
-}
-
-/**
- * Generates the maintenance mode location block that intercepts all requests.
- */
-function generateMaintenanceLocation(config: NginxSiteConfig): string {
-  const pageContent = config.maintenancePage || getDefaultMaintenancePage(config.domain);
-  const encoded = Buffer.from(pageContent).toString('base64');
-  return `
-
-    # Maintenance mode - redirect all to maintenance page
-    set $maintenance 1;
-    if ($uri = /maintenance.html) {
-        set $maintenance 0;
-    }
-    if ($maintenance = 1) {
-        return 503;
-    }
-    error_page 503 @maintenance;
-    location @maintenance {
-        default_type text/html;
-        return 200 '${pageContent.replace(/'/g, "\\'").replace(/\n/g, '\\n')}';
-    }`;
+export function getMaintenanceFilePath(domain: string): string {
+  return `${MAINTENANCE_DIR}/${domain}.html`;
 }
 
 /**
@@ -367,7 +56,7 @@ export function getDefaultMaintenancePage(domain: string): string {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Em Manutenção - ${domain}</title>
+    <title>Em Manutencao - ${domain}</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -387,11 +76,7 @@ export function getDefaultMaintenancePage(domain: string): string {
             max-width: 600px;
             margin: 1rem;
         }
-        .icon {
-            font-size: 4rem;
-            margin-bottom: 1.5rem;
-            animation: pulse 2s ease-in-out infinite;
-        }
+        .icon { font-size: 4rem; margin-bottom: 1.5rem; animation: pulse 2s ease-in-out infinite; }
         @keyframes pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
         h1 { font-size: 2rem; margin-bottom: 1rem; font-weight: 600; }
         p { color: rgba(255,255,255,0.7); line-height: 1.6; margin-bottom: 1.5rem; }
@@ -403,9 +88,9 @@ export function getDefaultMaintenancePage(domain: string): string {
 </head>
 <body>
     <div class="container">
-        <div class="icon">🔧</div>
+        <div class="icon">&#x1F527;</div>
         <h1>${domain}</h1>
-        <div class="status">⚠️ Em Manutenção Programada</div>
+        <div class="status">&#x26A0;&#xFE0F; Em Manutencao Programada</div>
         <p>Estamos realizando melhorias no servidor.<br>Por favor, tente novamente em alguns minutos.</p>
         <div class="footer">Duart Panel &copy; ${new Date().getFullYear()}</div>
     </div>
@@ -413,13 +98,137 @@ export function getDefaultMaintenancePage(domain: string): string {
 </html>`;
 }
 
-/**
- * Generates an SSL-enabled NGINX server block.
- */
+/* ------------------------------------------------------------------ */
+/*  Config generators (standalone, non-SSL)                            */
+/* ------------------------------------------------------------------ */
+
+export function generateStaticConfig(domain: string, root: string, extraConfig?: NginxSiteConfig): string {
+  const serverNames = [domain, ...(extraConfig?.aliases || [])].join(' ');
+  const maintenancePath = `${MAINTENANCE_DIR}/${domain}.html`;
+  let config = `server {
+    listen ${extraConfig?.listenPort || 80};
+    server_name ${serverNames};
+    root ${root};
+    index index.html index.htm;`;
+
+  config += buildCommonServerOpts(extraConfig, domain);
+
+  config += `
+
+    location / {
+        try_files ${maintenancePath} $uri $uri/ =404;`;
+
+  if (extraConfig?.cacheStaticDuration) {
+    config += `
+        expires ${extraConfig.cacheStaticDuration};`;
+  }
+
+  config += `
+    }`;
+
+  config += buildExtraServerConfig(extraConfig);
+
+  config += `
+}`;
+  return config;
+}
+
+export function generatePhpConfig(domain: string, root: string, phpVersion: string = '8.3', extraConfig?: NginxSiteConfig): string {
+  const serverNames = [domain, ...(extraConfig?.aliases || [])].join(' ');
+  const maintenancePath = `${MAINTENANCE_DIR}/${domain}.html`;
+  let config = `server {
+    listen ${extraConfig?.listenPort || 80};
+    server_name ${serverNames};
+    root ${root};
+    index index.php index.html;`;
+
+  config += buildCommonServerOpts(extraConfig, domain);
+
+  config += `
+
+    location / {
+        try_files ${maintenancePath} $uri $uri/ /index.php?$query_string;`;
+
+  if (extraConfig?.cacheStaticDuration) {
+    config += `
+        expires ${extraConfig.cacheStaticDuration};`;
+  }
+
+  config += `
+    }
+
+    location ~ \\.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php${phpVersion}-fpm.sock;
+    }`;
+
+  config += buildExtraServerConfig(extraConfig);
+
+  config += `
+}`;
+  return config;
+}
+
+export function generateProxyConfig(domain: string, port: number, websocket: boolean = false, extraConfig?: NginxSiteConfig): string {
+  const serverNames = [domain, ...(extraConfig?.aliases || [])].join(' ');
+  const maintenancePath = `${MAINTENANCE_DIR}/${domain}.html`;
+  let config = `server {
+    listen ${extraConfig?.listenPort || 80};
+    server_name ${serverNames};
+`;
+
+  if (extraConfig?.clientMaxBodySize) {
+    config += `    client_max_body_size ${extraConfig.clientMaxBodySize};\n`;
+  }
+
+  if (extraConfig?.gzip !== false) {
+    config += `    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
+`;
+  }
+
+  config += `
+    location / {
+        try_files ${maintenancePath} @proxy_backend;
+    }
+
+    location @proxy_backend {
+        proxy_pass http://localhost:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;`;
+
+  if (websocket) {
+    config += `
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;`;
+  }
+
+  config += `
+    }`;
+
+  config += buildExtraServerConfig(extraConfig);
+
+  config += `
+
+    access_log ${extraConfig?.accessLogPath || `/var/log/nginx/${domain}.access.log`};
+    error_log ${extraConfig?.errorLogPath || `/var/log/nginx/${domain}.error.log`};
+}`;
+  return config;
+}
+
+/* ------------------------------------------------------------------ */
+/*  SSL-specific generators                                            */
+/* ------------------------------------------------------------------ */
+
 export function generateSslConfig(domain: string, certPath: string, keyPath: string, chainPath?: string, extraConfig?: NginxSiteConfig): string {
+  const serverNames = [domain, ...(extraConfig?.aliases || [])].join(' ');
   let config = `server {
     listen ${extraConfig?.listenPort || 443} ssl http2;
-    server_name ${[domain, ...(extraConfig?.aliases || [])].join(' ')};
+    server_name ${serverNames};
 
     ssl_certificate ${certPath};
     ssl_certificate_key ${keyPath};`;
@@ -446,20 +255,19 @@ export function generateSslConfig(domain: string, certPath: string, keyPath: str
   return config;
 }
 
-/**
- * Generates HTTP-to-HTTPS redirect NGINX config.
- */
 export function generateHttpRedirectConfig(domain: string, aliases?: string[]): string {
+  const serverNames = [domain, ...(aliases || [])].join(' ');
   return `server {
     listen 80;
-    server_name ${[domain, ...(aliases || [])].join(' ')};
+    server_name ${serverNames};
     return 301 https://$server_name$request_uri;
 }`;
 }
 
-/**
- * Generates a complete site config based on the provided configuration.
- */
+/* ------------------------------------------------------------------ */
+/*  Master config generator                                            */
+/* ------------------------------------------------------------------ */
+
 export function generateSiteConfig(config: NginxSiteConfig): string {
   const parts: string[] = [];
 
@@ -468,13 +276,11 @@ export function generateSiteConfig(config: NginxSiteConfig): string {
     parts.push(generateHttpRedirectConfig(config.domain, config.aliases));
   }
 
-  // Main server block
   let mainConfig = '';
 
   if (config.ssl && config.sslCertPath && config.sslKeyPath) {
     mainConfig = generateSslConfig(config.domain, config.sslCertPath, config.sslKeyPath, config.sslChainPath, config);
 
-    // Add the location/content block inside SSL server
     switch (config.type) {
       case 'static':
         mainConfig = replaceClosingBrace(mainConfig, generateStaticContent(config.root || `/var/www/${config.domain}`, config));
@@ -487,7 +293,6 @@ export function generateSiteConfig(config: NginxSiteConfig): string {
         break;
     }
   } else {
-    // Non-SSL
     switch (config.type) {
       case 'static':
         mainConfig = generateStaticConfig(config.domain, config.root || `/var/www/${config.domain}`, config);
@@ -502,11 +307,15 @@ export function generateSiteConfig(config: NginxSiteConfig): string {
   }
 
   parts.push(mainConfig);
-
   return parts.join('\n\n');
 }
 
+/* ------------------------------------------------------------------ */
+/*  Content helpers (used inside SSL server blocks)                    */
+/* ------------------------------------------------------------------ */
+
 function generateStaticContent(root: string, config?: NginxSiteConfig): string {
+  const maintenancePath = config ? `${MAINTENANCE_DIR}/${config.domain}.html` : null;
   let content = `
     root ${root};
     index index.html index.htm;`;
@@ -516,10 +325,16 @@ function generateStaticContent(root: string, config?: NginxSiteConfig): string {
     client_max_body_size ${config.clientMaxBodySize};`;
   }
 
+  if (config?.gzip !== false) {
+    content += `
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;`;
+  }
+
   content += `
 
     location / {
-        try_files $uri $uri/ =404;`;
+        try_files ${maintenancePath || '/dev/null'} $uri $uri/ =404;`;
 
   if (config?.cacheStaticDuration) {
     content += `
@@ -529,14 +344,17 @@ function generateStaticContent(root: string, config?: NginxSiteConfig): string {
   content += `
     }`;
 
-  if (config?.maintenance) {
-    content += generateMaintenanceLocation(config);
-  }
+  content += buildExtraServerConfig(config);
 
-  return addExtraServerConfig(content, config);
+  content += `
+
+    access_log ${config?.accessLogPath || `/var/log/nginx/${config?.domain || 'site'}.access.log`};
+    error_log ${config?.errorLogPath || `/var/log/nginx/${config?.domain || 'site'}.error.log`};`;
+  return content;
 }
 
 function generatePhpContent(root: string, phpVersion: string, config?: NginxSiteConfig): string {
+  const maintenancePath = config ? `${MAINTENANCE_DIR}/${config.domain}.html` : null;
   let content = `
     root ${root};
     index index.php index.html;`;
@@ -546,10 +364,16 @@ function generatePhpContent(root: string, phpVersion: string, config?: NginxSite
     client_max_body_size ${config.clientMaxBodySize};`;
   }
 
+  if (config?.gzip !== false) {
+    content += `
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;`;
+  }
+
   content += `
 
     location / {
-        try_files $uri $uri/ /index.php?$query_string;`;
+        try_files ${maintenancePath || '/dev/null'} $uri $uri/ /index.php?$query_string;`;
 
   if (config?.cacheStaticDuration) {
     content += `
@@ -557,24 +381,30 @@ function generatePhpContent(root: string, phpVersion: string, config?: NginxSite
   }
 
   content += `
-    }`;
-
-  if (config?.maintenance) {
-    content += generateMaintenanceLocation(config);
-  }
-
-  content += `
+    }
 
     location ~ \\.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/var/run/php/php${phpVersion}-fpm.sock;
     }`;
 
-  return addExtraServerConfig(content, config);
+  content += buildExtraServerConfig(config);
+
+  content += `
+
+    access_log ${config?.accessLogPath || `/var/log/nginx/${config?.domain || 'site'}.access.log`};
+    error_log ${config?.errorLogPath || `/var/log/nginx/${config?.domain || 'site'}.error.log`};`;
+  return content;
 }
 
 function generateProxyContent(port: number, websocket: boolean, config?: NginxSiteConfig): string {
-  let content = `\n    location / {
+  const maintenancePath = config ? `${MAINTENANCE_DIR}/${config.domain}.html` : null;
+  let content = `
+    location / {
+        try_files ${maintenancePath || '/dev/null'} @proxy_backend;
+    }
+
+    location @proxy_backend {
         proxy_pass http://localhost:${port};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -592,102 +422,102 @@ function generateProxyContent(port: number, websocket: boolean, config?: NginxSi
   content += `
     }`;
 
-  if (config?.maintenance) {
-    content += generateMaintenanceLocation(config);
-  }
+  content += buildExtraServerConfig(config);
 
-  return addExtraServerConfig(content, config);
+  content += `
+
+    access_log ${config?.accessLogPath || `/var/log/nginx/${config?.domain || 'site'}.access.log`};
+    error_log ${config?.errorLogPath || `/var/log/nginx/${config?.domain || 'site'}.error.log`};`;
+  return content;
 }
 
-function addExtraServerConfig(content: string, config?: NginxSiteConfig): string {
-  if (!config) return content;
+/* ------------------------------------------------------------------ */
+/*  Shared helpers                                                     */
+/* ------------------------------------------------------------------ */
+
+function buildCommonServerOpts(config?: NginxSiteConfig, domain?: string): string {
+  let s = '';
+  if (config?.clientMaxBodySize) {
+    s += `
+    client_max_body_size ${config.clientMaxBodySize};`;
+  }
+  if (config?.gzip !== false) {
+    s += `
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;`;
+  }
+  return s;
+}
+
+function buildExtraServerConfig(config?: NginxSiteConfig): string {
+  if (!config) return '';
+  let s = '';
 
   // IP restrictions
   if (config.allowIps?.length || config.denyIps?.length) {
-    content += `
-    # IP Access Control`;
+    s += '\n    # IP Access Control';
     for (const ip of config.denyIps || []) {
-      content += `
-    deny ${ip};`;
+      s += `\n    deny ${ip};`;
     }
     for (const ip of config.allowIps || []) {
-      content += `
-    allow ${ip};`;
+      s += `\n    allow ${ip};`;
     }
     if (config.denyIps?.length && !config.allowIps?.length) {
-      content += `
-    allow all;`;
+      s += `\n    allow all;`;
     }
   }
 
   // Basic auth
   if (config.authBasicFile) {
-    content += `
-    auth_basic "${config.authBasicRealm || 'Restricted Area'}";
-    auth_basic_user_file ${config.authBasicFile};`;
+    s += `\n    auth_basic "${config.authBasicRealm || 'Restricted Area'}";`;
+    s += `\n    auth_basic_user_file ${config.authBasicFile};`;
   }
 
   // Error pages
   if (config.errorPages) {
     for (const [code, path] of Object.entries(config.errorPages)) {
-      content += `
-    error_page ${code} ${path};`;
+      s += `\n    error_page ${code} ${path};`;
     }
   }
 
   // Custom directives
   if (config.customDirectives) {
-    content += `
-    ${config.customDirectives}`;
+    s += `\n    ${config.customDirectives}`;
   }
 
-  return content;
+  return s;
 }
 
 function replaceClosingBrace(config: string, content: string): string {
-  // Remove the last closing brace and append content + closing brace
   const lastBrace = config.lastIndexOf('}');
   if (lastBrace === -1) return config;
   return config.slice(0, lastBrace) + content + '\n}';
 }
 
-/**
- * Represents a parsed vhost found on the filesystem (not necessarily managed by the panel).
- */
+/* ------------------------------------------------------------------ */
+/*  Vhost parsing                                                      */
+/* ------------------------------------------------------------------ */
+
 export interface ParsedVhost {
-  /** Filename in sites-available */
   fileName: string;
-  /** Full path to the config file */
   configPath: string;
-  /** Whether it's symlinked in sites-enabled */
   enabled: boolean;
-  /** All server_name values found */
   domains: string[];
-  /** Detected document root */
   root: string | null;
-  /** Detected proxy_pass target */
   proxyPass: string | null;
-  /** Whether websocket upgrade headers are present */
   websocket: boolean;
-  /** PHP-FPM socket path if detected */
   phpFpmSocket: string | null;
-  /** Detected site type */
   detectedType: 'static' | 'php' | 'proxy' | 'unknown';
-  /** Whether this vhost is already managed by the panel */
   managed: boolean;
-  /** Panel site ID if managed */
   panelId: string | null;
-  /** Listen ports */
   listenPorts: string[];
-  /** Has SSL configured */
   ssl: boolean;
-  /** Raw config content (first 8KB) */
+  sslCertPath: string | null;
+  sslKeyPath: string | null;
+  sslChainPath: string | null;
   rawConfigPreview: string;
 }
 
-/**
- * Parses a single NGINX config file and extracts vhost information.
- */
 export function parseNginxConfigFile(content: string, fileName: string, configPath: string, enabled: boolean, panelSiteIds: Map<string, string>): ParsedVhost {
   const domains: string[] = [];
   let root: string | null = null;
@@ -696,38 +526,35 @@ export function parseNginxConfigFile(content: string, fileName: string, configPa
   let phpFpmSocket: string | null = null;
   const listenPorts: string[] = [];
   let ssl = false;
+  let sslCertPath: string | null = null;
+  let sslKeyPath: string | null = null;
+  let sslChainPath: string | null = null;
 
-  // Extract server_name
   const serverNameMatch = content.match(/server_name\s+([^;]+);/);
   if (serverNameMatch) {
     const names = serverNameMatch[1].trim().split(/\s+/).filter(n => n && n !== '_');
     domains.push(...names);
   }
 
-  // Extract root
   const rootMatch = content.match(/root\s+([^;]+);/);
   if (rootMatch) {
     root = rootMatch[1].trim();
   }
 
-  // Extract proxy_pass
   const proxyPassMatch = content.match(/proxy_pass\s+(https?:\/\/[^;]+|[^;]+);/);
   if (proxyPassMatch) {
     proxyPass = proxyPassMatch[1].trim();
   }
 
-  // Check for websocket upgrade
   if (content.includes('Upgrade') && content.includes('Connection') && content.includes('upgrade')) {
     websocket = true;
   }
 
-  // Check for PHP-FPM
   const phpMatch = content.match(/fastcgi_pass\s+([^;]+);/);
   if (phpMatch) {
     phpFpmSocket = phpMatch[1].trim();
   }
 
-  // Extract listen directives
   const listenMatches = content.matchAll(/listen\s+([^;]+);/g);
   for (const m of listenMatches) {
     const listen = m[1].trim();
@@ -737,12 +564,25 @@ export function parseNginxConfigFile(content: string, fileName: string, configPa
     }
   }
 
-  // Also check for ssl_certificate directives
   if (content.includes('ssl_certificate')) {
     ssl = true;
   }
 
-  // Detect type
+  // Extract SSL certificate paths
+  const sslCertMatch = content.match(/ssl_certificate\s+([^;]+);/);
+  if (sslCertMatch) {
+    sslCertPath = sslCertMatch[1].trim();
+  }
+  // Skip ssl_certificate_key that is NOT the private key (e.g., chain files)
+  const sslKeyMatch = content.match(/ssl_certificate_key\s+([^;]+);/);
+  if (sslKeyMatch) {
+    sslKeyPath = sslKeyMatch[1].trim();
+  }
+  const sslChainMatch = content.match(/ssl_trusted_certificate\s+([^;]+);/);
+  if (sslChainMatch) {
+    sslChainPath = sslChainMatch[1].trim();
+  }
+
   let detectedType: ParsedVhost['detectedType'] = 'unknown';
   if (phpFpmSocket) {
     detectedType = 'php';
@@ -752,7 +592,6 @@ export function parseNginxConfigFile(content: string, fileName: string, configPa
     detectedType = 'static';
   }
 
-  // Check if managed by panel (match by domain in panelSiteIds)
   let managed = false;
   let panelId: string | null = null;
   for (const domain of domains) {
@@ -777,6 +616,9 @@ export function parseNginxConfigFile(content: string, fileName: string, configPa
     panelId,
     listenPorts,
     ssl,
+    sslCertPath,
+    sslKeyPath,
+    sslChainPath,
     rawConfigPreview: content.substring(0, 8192),
   };
 }
