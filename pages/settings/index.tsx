@@ -162,7 +162,7 @@ export default function SettingsPage() {
               />
               <Input
                 label="Modelo"
-                placeholder="deepseek-chat"
+                placeholder="deepseek-v4-pro"
                 value={aiModel}
                 onChange={e => setAiModel(e.target.value)}
                 className="mt-4"

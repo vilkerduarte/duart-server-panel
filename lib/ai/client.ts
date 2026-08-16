@@ -14,7 +14,7 @@ export interface AiProviderConfig {
 }
 
 export const PROVIDER_PRESETS: Record<string, { baseUrl: string; defaultModel: string; label: string }> = {
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-chat', label: 'DeepSeek' },
+  deepseek: { baseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-v4-pro', label: 'DeepSeek' },
   openai: { baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini', label: 'OpenAI' },
   groq: { baseUrl: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', label: 'Groq' },
   local: { baseUrl: 'http://127.0.0.1:11434/v1', defaultModel: 'qwen2.5-coder', label: 'Local (Ollama)' },

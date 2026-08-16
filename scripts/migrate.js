@@ -116,6 +116,13 @@ function migrateConfig() {
   if (config.sslContactEmail === undefined) { config.sslContactEmail = ''; change('config: sslContactEmail'); }
   if (config.fileManagerRoots === undefined) { config.fileManagerRoots = []; change('config: fileManagerRoots (raízes do gerenciador de arquivos)'); }
 
+  // O modelo salvo sobrepõe o default do código, então trocar o default não
+  // basta: instalações existentes continuariam no modelo antigo.
+  if (config.aiModel === 'deepseek-chat') {
+    change('config: aiModel deepseek-chat → deepseek-v4-pro');
+    config.aiModel = 'deepseek-v4-pro';
+  }
+
   // O alerta de expiração era 5 dias; o Let's Encrypt recomenda 30.
   if (Number(config.sslRenewDaysBefore) > 0 && Number(config.sslRenewDaysBefore) < 30) {
     change(`config: sslRenewDaysBefore ${config.sslRenewDaysBefore} → 30 (recomendação do Let's Encrypt)`);

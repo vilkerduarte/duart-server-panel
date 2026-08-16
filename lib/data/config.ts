@@ -53,7 +53,7 @@ const DEFAULT_CONFIG: AppConfig = {
   hostname: 'localhost',
   language: 'pt-BR',
   aiApiKey: '',
-  aiModel: 'deepseek-chat',
+  aiModel: 'deepseek-v4-pro',
   aiBaseUrl: '',
   aiProvider: 'deepseek',
   aiDefaultMode: 'assisted',
