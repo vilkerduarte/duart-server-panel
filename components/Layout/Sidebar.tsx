@@ -7,7 +7,7 @@ import {
   HiOutlineCircleStack, HiOutlineLockClosed, HiOutlineKey,
   HiOutlineClock, HiOutlineArchiveBox, HiOutlineDocumentText,
   HiOutlineServer, HiOutlineCog, HiOutlineChevronLeft,
-  HiOutlineChevronRight, HiOutlineCommandLine,
+  HiOutlineChevronRight, HiOutlineCommandLine, HiOutlineBeaker,
 } from 'react-icons/hi2';
 
 interface SidebarProps {
@@ -21,6 +21,8 @@ const menuItems = [
   { href: '/files', icon: HiOutlineFolder, label: 'Arquivos' },
   { href: '/tasks', icon: HiOutlineCpuChip, label: 'Tarefas' },
   { href: '/nginx', icon: HiOutlineGlobeAlt, label: 'NGINX' },
+  { href: '/php', icon: HiOutlineCube, label: 'PHP' },
+  { href: '/python', icon: HiOutlineBeaker, label: 'Python' },
   { href: '/firewall', icon: HiOutlineShieldCheck, label: 'Firewall' },
   { href: '/docker', icon: HiOutlineCube, label: 'Docker' },
   { href: '/databases', icon: HiOutlineCircleStack, label: 'Bancos' },

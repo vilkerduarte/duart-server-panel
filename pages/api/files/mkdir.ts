@@ -1,25 +1,24 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
-import path from 'path';
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import { resolveSafePath } from '@/lib/paths';
+import { respondWithError, configuredRoots, methodNotAllowed } from '@/lib/api-helpers';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
-  }
+  if (req.method !== 'POST') return methodNotAllowed(res);
 
   try {
-    const { dirPath } = req.body;
+    const { dirPath } = req.body ?? {};
     if (!dirPath) return res.status(400).json({ success: false, error: 'Caminho é obrigatório' });
 
-    const resolvedPath = path.resolve('/', dirPath);
-    if (fs.existsSync(resolvedPath)) {
+    const resolved = resolveSafePath(dirPath, { allowedRoots: configuredRoots() });
+    if (fs.existsSync(resolved)) {
       return res.status(409).json({ success: false, error: 'Diretório já existe' });
     }
 
-    fs.mkdirSync(resolvedPath, { recursive: true });
-    return res.status(200).json({ success: true, data: { created: true, path: resolvedPath } });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    fs.mkdirSync(resolved, { recursive: true, mode: 0o755 });
+    return res.status(200).json({ success: true, data: { created: true, path: resolved } });
+  } catch (err) {
+    return respondWithError(res, err);
   }
 });

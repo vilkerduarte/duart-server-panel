@@ -1,83 +1,113 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
 import path from 'path';
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import { resolveSafePath, listAccessibleRoots } from '@/lib/paths';
+import { respondWithError, configuredRoots, methodNotAllowed } from '@/lib/api-helpers';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
-  }
+  if (req.method !== 'GET') return methodNotAllowed(res);
 
   try {
-    const dirPath = (req.query.path as string) || '/';
-    const showHidden = req.query.showHidden === 'true';
+    const roots = configuredRoots();
+    const requested = (req.query.path as string) || '';
 
-    // Security: resolve and validate path
-    const resolvedPath = path.resolve('/', dirPath);
-
-    // Check if exists
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ success: false, error: 'Diretório não encontrado' });
+    // Sem caminho, a navegação começa nas raízes permitidas em vez de em /.
+    if (!requested || requested === '/') {
+      return res.status(200).json({
+        success: true,
+        data: {
+          currentPath: '/',
+          parentPath: null,
+          isRootListing: true,
+          items: listAccessibleRoots(roots).map(root => ({
+            name: root,
+            path: root,
+            type: 'directory' as const,
+            size: 0,
+            permissions: 'drwxr-xr-x',
+            owner: '0',
+            group: '0',
+            modifiedAt: new Date().toISOString(),
+          })),
+        },
+      });
     }
 
-    const stat = fs.statSync(resolvedPath);
+    const resolved = resolveSafePath(requested, { allowedRoots: roots });
+    const showHidden = req.query.showHidden === 'true';
+
+    const stat = fs.statSync(resolved);
     if (!stat.isDirectory()) {
       return res.status(400).json({ success: false, error: 'O caminho não é um diretório' });
     }
 
-    const entries = fs.readdirSync(resolvedPath, { withFileTypes: true });
-    const items = entries
+    interface Entry {
+      name: string;
+      /** Caminho absoluto: a navegação usa este campo, não concatenação. */
+      path: string;
+      type: 'directory' | 'symlink' | 'file';
+      size: number;
+      permissions: string;
+      owner: string;
+      group: string;
+      modifiedAt: string;
+    }
+
+    const items: Entry[] = fs.readdirSync(resolved, { withFileTypes: true })
       .filter(entry => showHidden || !entry.name.startsWith('.'))
       .map(entry => {
-        const fullPath = path.join(resolvedPath, entry.name);
+        const fullPath = path.join(resolved, entry.name);
         let entryStat;
         try {
-          entryStat = fs.statSync(fullPath);
+          entryStat = fs.lstatSync(fullPath);
         } catch {
           return null;
         }
-
         return {
           name: entry.name,
+          path: fullPath,
           type: entry.isDirectory() ? 'directory' : entry.isSymbolicLink() ? 'symlink' : 'file',
           size: entryStat.size,
-          permissions: getPermissionsString(entryStat.mode),
-          owner: entryStat.uid.toString(),
-          group: entryStat.gid.toString(),
+          permissions: permissionsString(entryStat.mode),
+          owner: String(entryStat.uid),
+          group: String(entryStat.gid),
           modifiedAt: entryStat.mtime.toISOString(),
         };
       })
-      .filter(Boolean)
-      .sort((a: any, b: any) => {
+      .filter((entry): entry is Entry => entry !== null)
+      .sort((a, b) => {
         if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
         return a.name.localeCompare(b.name);
       });
 
+    // O pai só é oferecido quando ele também está dentro da jaula.
+    const parent = path.dirname(resolved);
+    let parentPath: string | null = null;
+    try {
+      resolveSafePath(parent, { allowedRoots: roots });
+      parentPath = parent === resolved ? null : parent;
+    } catch {
+      parentPath = '/';
+    }
+
     return res.status(200).json({
       success: true,
-      data: {
-        currentPath: resolvedPath,
-        parentPath: resolvedPath === '/' ? null : path.dirname(resolvedPath),
-        items,
-      },
+      data: { currentPath: resolved, parentPath, isRootListing: false, items },
     });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+  } catch (err) {
+    return respondWithError(res, err);
   }
 });
 
-function getPermissionsString(mode: number): string {
-  const type = '----------';
-  const chars = type.split('');
+function permissionsString(mode: number): string {
+  const chars = '----------'.split('');
   if (mode & 0o40000) chars[0] = 'd';
-  if (mode & 0o400) chars[1] = 'r';
-  if (mode & 0o200) chars[2] = 'w';
-  if (mode & 0o100) chars[3] = 'x';
-  if (mode & 0o40) chars[4] = 'r';
-  if (mode & 0o20) chars[5] = 'w';
-  if (mode & 0o10) chars[6] = 'x';
-  if (mode & 0o4) chars[7] = 'r';
-  if (mode & 0o2) chars[8] = 'w';
-  if (mode & 0o1) chars[9] = 'x';
+  if (mode & 0o120000) chars[0] = 'l';
+  const bits = [0o400, 0o200, 0o100, 0o40, 0o20, 0o10, 0o4, 0o2, 0o1];
+  const letters = ['r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x'];
+  bits.forEach((bit, index) => {
+    if (mode & bit) chars[index + 1] = letters[index];
+  });
   return chars.join('');
 }

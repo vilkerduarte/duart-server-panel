@@ -1,30 +1,43 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
-import path from 'path';
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import { resolveSafePath } from '@/lib/paths';
+import { respondWithError, configuredRoots, methodNotAllowed } from '@/lib/api-helpers';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  if (req.method !== 'PUT') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
-  }
+  if (req.method !== 'PUT') return methodNotAllowed(res);
 
   try {
-    const { filePath, mode } = req.body;
-    if (!filePath || !mode) return res.status(400).json({ success: false, error: 'Caminho e modo são obrigatórios' });
-
-    const resolvedPath = path.resolve('/', filePath);
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ success: false, error: 'Arquivo não encontrado' });
+    const { filePath, mode, recursive } = req.body ?? {};
+    if (!filePath || !mode) {
+      return res.status(400).json({ success: false, error: 'Caminho e modo são obrigatórios' });
     }
 
-    const modeNum = parseInt(mode, 8);
-    if (isNaN(modeNum) || modeNum < 0 || modeNum > 0o777) {
-      return res.status(400).json({ success: false, error: 'Modo inválido (use octal: 755)' });
+    if (!/^[0-7]{3,4}$/.test(String(mode))) {
+      return res.status(400).json({ success: false, error: 'Modo inválido — use octal de 3 ou 4 dígitos (ex.: 755)' });
     }
 
-    fs.chmodSync(resolvedPath, modeNum);
-    return res.status(200).json({ success: true, data: { changed: true } });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    const modeNum = parseInt(String(mode), 8);
+    const resolved = resolveSafePath(filePath, { allowedRoots: configuredRoots() });
+
+    if (recursive && fs.statSync(resolved).isDirectory()) {
+      chmodRecursive(resolved, modeNum);
+    } else {
+      fs.chmodSync(resolved, modeNum);
+    }
+
+    return res.status(200).json({ success: true, data: { changed: true, path: resolved, mode } });
+  } catch (err) {
+    return respondWithError(res, err);
   }
 });
+
+function chmodRecursive(target: string, mode: number): void {
+  fs.chmodSync(target, mode);
+  for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+    const child = `${target}/${entry.name}`;
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) chmodRecursive(child, mode);
+    else fs.chmodSync(child, mode);
+  }
+}

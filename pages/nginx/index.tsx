@@ -5,13 +5,14 @@ import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import Badge from '@/components/ui/Badge';
 import SiteForm from '@/components/nginx/SiteForm';
+import RegenerateModal from '@/components/nginx/RegenerateModal';
 import SiteEditModal from '@/components/nginx/SiteEditModal';
 import { useToast } from '@/lib/contexts/ToastContext';
 import {
   HiOutlinePlus, HiOutlineTrash, HiOutlineMagnifyingGlass,
   HiOutlineArrowDownTray, HiOutlineGlobeAlt, HiOutlineServer,
   HiOutlinePencilSquare, HiOutlineShieldCheck, HiOutlineWrench,
-  HiOutlinePower, HiOutlinePlay,
+  HiOutlinePower, HiOutlinePlay, HiOutlineArrowPath,
 } from 'react-icons/hi2';
 
 interface ExternalVhost {
@@ -41,6 +42,7 @@ export default function NginxPage() {
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [showRegenerate, setShowRegenerate] = useState(false);
   const [showExternal, setShowExternal] = useState(false);
   const [activeTab, setActiveTab] = useState<'managed' | 'external'>('managed');
   const [importingFile, setImportingFile] = useState<string | null>(null);
@@ -259,6 +261,10 @@ export default function NginxPage() {
             <Button variant="ghost" onClick={handleScan} disabled={scanning}>
               <HiOutlineMagnifyingGlass className="w-4 h-4" />
               {scanning ? 'Escaneando...' : 'Escanear Vhosts'}
+            </Button>
+            <Button variant="ghost" onClick={() => setShowRegenerate(true)} title="Reescreve os vhosts no formato atual (IPv6, ACME, manutenção)">
+              <HiOutlineArrowPath className="w-4 h-4" />
+              Regenerar configurações
             </Button>
             <Button onClick={() => setShowForm(true)}>
               <HiOutlinePlus className="w-4 h-4" /> Novo Site
@@ -481,6 +487,16 @@ export default function NginxPage() {
             )}
           </>
         )}
+
+        <RegenerateModal
+
+          open={showRegenerate}
+
+          onClose={() => setShowRegenerate(false)}
+
+          onDone={fetchSites}
+
+        />
 
         <SiteForm open={showForm} onClose={() => setShowForm(false)} onSubmit={handleCreate} />
 

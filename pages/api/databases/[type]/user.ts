@@ -1,126 +1,133 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
+import type { NextApiResponse } from 'next';
 import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
-import { executeRaw } from '@/lib/system';
+import {
+  DbType, DbInputError, assertIdentifier, assertHost, assertPassword,
+  mysqlString, pgString, jsString, mysqlIdent, pgIdent,
+  mysqlExec, psqlExec, mongoshExec, listUsers, friendlyDbError,
+} from '@/lib/db';
 
+/**
+ * Usuários de banco.
+ *
+ * Nenhum valor entra por interpolação em linha de comando: o SQL é montado com
+ * escape explícito e entregue ao cliente via stdin ou como argumento único de
+ * execFile. Senha nunca aparece em `ps aux`.
+ */
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  const { type } = req.query;
+  const type = req.query.type as DbType;
 
-  if (!['mysql', 'postgresql', 'mongodb'].includes(type as string)) {
+  if (!['mysql', 'postgresql', 'mongodb'].includes(type)) {
     return res.status(400).json({ success: false, error: 'Tipo inválido' });
   }
 
   try {
-    // GET - List users
     if (req.method === 'GET') {
-      let cmd = '';
-      if (type === 'mysql') {
-        cmd = 'sudo mysql -e "SELECT User, Host FROM mysql.user" -sN 2>/dev/null';
-      } else if (type === 'postgresql') {
-        cmd = 'sudo -u postgres psql -tAc "SELECT rolname FROM pg_roles WHERE rolcanlogin = true" 2>/dev/null';
-      } else if (type === 'mongodb') {
-        cmd = 'sudo mongosh --quiet --eval "db.adminCommand({usersInfo:1}).users.forEach(u=>print(u.user+\'@\'+(u.db||\'admin\')))" 2>/dev/null';
-      }
-
-      const result = await executeRaw(cmd, 8000);
-      const users = (result.stdout || '').split('\n')
-        .map(l => l.trim())
-        .filter(Boolean)
-        .map(l => {
-          const parts = l.split(/\s+/);
-          return type === 'mongodb'
-            ? { user: l.split('@')[0] || l, host: l.split('@')[1] || 'admin' }
-            : { user: parts[0] || '', host: parts[1] || 'localhost' };
-        })
-        .filter(u => u.user && u.user !== 'User');
-
-      return res.status(200).json({ success: true, data: { users } });
+      return res.status(200).json({ success: true, data: { users: await listUsers(type) } });
     }
 
-    // POST - Create / Drop / Password / Grant
-    if (req.method === 'POST') {
-      const { action, username, password, database, host } = req.body;
-
-      if (!action) {
-        return res.status(400).json({ success: false, error: 'Ação é obrigatória' });
-      }
-
-      if (!username && action !== 'list') {
-        return res.status(400).json({ success: false, error: 'Username é obrigatório' });
-      }
-
-      const safeUser = (username || '').replace(/[^a-zA-Z0-9_-]/g, '');
-      const safeDb = (database || '').replace(/[^a-zA-Z0-9_-]/g, '');
-      const safeHost = (host || 'localhost').replace(/[^a-zA-Z0-9_.%-]/g, '');
-
-      // Create user
-      if (action === 'create') {
-        if (!password) return res.status(400).json({ success: false, error: 'Senha é obrigatória' });
-
-        if (type === 'mysql') {
-          await executeRaw(`sudo mysql -e "CREATE USER '${safeUser}'@'${safeHost}' IDENTIFIED BY '${password}'"`, 10000);
-          if (safeDb) {
-            await executeRaw(`sudo mysql -e "GRANT ALL PRIVILEGES ON \\\`${safeDb}\\\`.* TO '${safeUser}'@'${safeHost}'"`, 10000);
-          } else {
-            await executeRaw(`sudo mysql -e "GRANT ALL PRIVILEGES ON *.* TO '${safeUser}'@'${safeHost}' WITH GRANT OPTION"`, 10000);
-          }
-          await executeRaw(`sudo mysql -e "FLUSH PRIVILEGES"`, 5000);
-        } else if (type === 'postgresql') {
-          await executeRaw(`sudo -u postgres psql -c "CREATE ROLE ${safeUser} WITH LOGIN PASSWORD '${password}'"`, 10000);
-          if (safeDb) {
-            await executeRaw(`sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE \\"${safeDb}\\" TO ${safeUser}"`, 10000);
-          }
-        } else if (type === 'mongodb') {
-          const targetDb = safeDb || 'admin';
-          await executeRaw(`sudo mongosh --quiet --eval "db.getSiblingDB('${targetDb}').createUser({user:'${safeUser}',pwd:'${password}',roles:[{role:'readWrite',db:'${targetDb}'},{role:'dbAdmin',db:'${targetDb}'}]})"`, 10000);
-        }
-
-        return res.status(200).json({ success: true, data: { created: true, username: safeUser, database: safeDb || 'all' } });
-      }
-
-      // Drop user
-      if (action === 'drop') {
-        if (type === 'mysql') {
-          await executeRaw(`sudo mysql -e "DROP USER IF EXISTS '${safeUser}'@'${safeHost}'"`, 10000);
-        } else if (type === 'postgresql') {
-          await executeRaw(`sudo -u postgres psql -c "DROP ROLE IF EXISTS ${safeUser}"`, 10000);
-        } else if (type === 'mongodb') {
-          await executeRaw(`sudo mongosh --quiet --eval "db.getSiblingDB('${safeDb || 'admin'}').dropUser('${safeUser}')"`, 10000);
-        }
-        return res.status(200).json({ success: true, data: { dropped: true, username: safeUser } });
-      }
-
-      // Change password
-      if (action === 'password') {
-        if (!password) return res.status(400).json({ success: false, error: 'Nova senha é obrigatória' });
-
-        if (type === 'mysql') {
-          await executeRaw(`sudo mysql -e "ALTER USER '${safeUser}'@'${safeHost}' IDENTIFIED BY '${password}'"`, 10000);
-        } else if (type === 'postgresql') {
-          await executeRaw(`sudo -u postgres psql -c "ALTER ROLE ${safeUser} WITH PASSWORD '${password}'"`, 10000);
-        } else if (type === 'mongodb') {
-          await executeRaw(`sudo mongosh --quiet --eval "db.getSiblingDB('${safeDb || 'admin'}').changeUserPassword('${safeUser}','${password}')"`, 10000);
-        }
-        return res.status(200).json({ success: true, data: { changed: true, username: safeUser } });
-      }
-
-      // Grant privileges to a specific database
-      if (action === 'grant') {
-        if (!safeDb) return res.status(400).json({ success: false, error: 'Database é obrigatório para grant' });
-
-        if (type === 'mysql') {
-          await executeRaw(`sudo mysql -e "GRANT ALL PRIVILEGES ON \\\`${safeDb}\\\`.* TO '${safeUser}'@'${safeHost}'"`, 10000);
-          await executeRaw(`sudo mysql -e "FLUSH PRIVILEGES"`, 5000);
-        } else if (type === 'postgresql') {
-          await executeRaw(`sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE \\"${safeDb}\\" TO ${safeUser}"`, 10000);
-        }
-        return res.status(200).json({ success: true, data: { granted: true, username: safeUser, database: safeDb } });
-      }
-
-      return res.status(400).json({ success: false, error: 'Ação não suportada' });
+    if (req.method !== 'POST') {
+      return res.status(405).json({ success: false, error: 'Método não permitido' });
     }
 
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
+    const { action, username, password, database, host } = req.body ?? {};
+    if (!action) return res.status(400).json({ success: false, error: 'Ação é obrigatória' });
+    if (!username) return res.status(400).json({ success: false, error: 'Usuário é obrigatório' });
+
+    const user = assertIdentifier(username, 'Nome de usuário');
+    const userHost = assertHost(host || 'localhost');
+    const db = database ? assertIdentifier(database, 'Nome do banco') : null;
+
+    let result;
+
+    switch (action) {
+      case 'create': {
+        const pass = assertPassword(password);
+        if (type === 'mysql') {
+          const statements = [
+            `CREATE USER ${mysqlString(user)}@${mysqlString(userHost)} IDENTIFIED BY ${mysqlString(pass)};`,
+            db
+              ? `GRANT ALL PRIVILEGES ON ${mysqlIdent(db)}.* TO ${mysqlString(user)}@${mysqlString(userHost)};`
+              : `GRANT ALL PRIVILEGES ON *.* TO ${mysqlString(user)}@${mysqlString(userHost)} WITH GRANT OPTION;`,
+            'FLUSH PRIVILEGES;',
+          ];
+          result = await mysqlExec(statements.join('\n'));
+        } else if (type === 'postgresql') {
+          result = await psqlExec(`CREATE ROLE ${pgIdent(user)} WITH LOGIN PASSWORD ${pgString(pass)};`);
+          if (result.code === 0 && db) {
+            result = await psqlExec(`GRANT ALL PRIVILEGES ON DATABASE ${pgIdent(db)} TO ${pgIdent(user)};`);
+          }
+        } else {
+          const target = db || 'admin';
+          result = await mongoshExec(
+            `db.getSiblingDB(${jsString(target)}).createUser({user:${jsString(user)},pwd:${jsString(pass)},` +
+            `roles:[{role:"readWrite",db:${jsString(target)}},{role:"dbAdmin",db:${jsString(target)}}]})`,
+          );
+        }
+        break;
+      }
+
+      case 'drop': {
+        if (type === 'mysql') {
+          result = await mysqlExec(
+            `DROP USER IF EXISTS ${mysqlString(user)}@${mysqlString(userHost)};\nFLUSH PRIVILEGES;`,
+          );
+        } else if (type === 'postgresql') {
+          result = await psqlExec(`DROP ROLE IF EXISTS ${pgIdent(user)};`);
+        } else {
+          result = await mongoshExec(`db.getSiblingDB(${jsString(db || 'admin')}).dropUser(${jsString(user)})`);
+        }
+        break;
+      }
+
+      case 'password': {
+        const pass = assertPassword(password);
+        if (type === 'mysql') {
+          result = await mysqlExec(
+            `ALTER USER ${mysqlString(user)}@${mysqlString(userHost)} IDENTIFIED BY ${mysqlString(pass)};\nFLUSH PRIVILEGES;`,
+          );
+        } else if (type === 'postgresql') {
+          result = await psqlExec(`ALTER ROLE ${pgIdent(user)} WITH PASSWORD ${pgString(pass)};`);
+        } else {
+          result = await mongoshExec(
+            `db.getSiblingDB(${jsString(db || 'admin')}).changeUserPassword(${jsString(user)},${jsString(pass)})`,
+          );
+        }
+        break;
+      }
+
+      case 'grant': {
+        if (!db) return res.status(400).json({ success: false, error: 'Banco de dados é obrigatório para conceder acesso' });
+
+        if (type === 'mysql') {
+          result = await mysqlExec(
+            `GRANT ALL PRIVILEGES ON ${mysqlIdent(db)}.* TO ${mysqlString(user)}@${mysqlString(userHost)};\nFLUSH PRIVILEGES;`,
+          );
+        } else if (type === 'postgresql') {
+          result = await psqlExec(`GRANT ALL PRIVILEGES ON DATABASE ${pgIdent(db)} TO ${pgIdent(user)};`);
+        } else {
+          result = await mongoshExec(
+            `db.getSiblingDB(${jsString(db)}).grantRolesToUser(${jsString(user)},[{role:"readWrite",db:${jsString(db)}}])`,
+          );
+        }
+        break;
+      }
+
+      default:
+        return res.status(400).json({ success: false, error: `Ação desconhecida: ${action}` });
+    }
+
+    if (result && result.code !== 0) {
+      return res.status(400).json({
+        success: false,
+        error: friendlyDbError(type, result.stderr || result.stdout),
+      });
+    }
+
+    return res.status(200).json({ success: true, data: { action, username: user } });
   } catch (err: any) {
+    if (err instanceof DbInputError) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
     return res.status(500).json({ success: false, error: err.message });
   }
 });

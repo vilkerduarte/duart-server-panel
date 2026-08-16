@@ -1,33 +1,47 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # ============================================
-# Duart Panel - Installation Script (Idempotente)
-# Alvo: Ubuntu 25.10 / Debian-based
-# Segura para re-execução em caso de falha parcial
+# Duart Panel — instalação / reparo
+# Alvo: Ubuntu 24.04+ / 25.10 · Debian 12+
+#
+# Idempotente: pode ser reexecutado com segurança.
 # ============================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-log_skip()  { echo -e "${CYAN}[SKIP]${NC} $1"; }
+log_error() { echo -e "${RED}[ERRO]${NC} $1" >&2; }
+log_skip()  { echo -e "${CYAN}[PULA]${NC} $1"; }
+
+trap 'log_error "Falha na linha $LINENO. Instalação interrompida."' ERR
 
 if [[ $EUID -ne 0 ]]; then
-   log_error "Este script deve ser executado como root (use sudo)"
+   log_error "Execute como root (sudo bash scripts/install.sh)"
    exit 1
 fi
 
 # ============================================
-# 1. DETECTAR INSTALAÇÃO EXISTENTE
+# Argumentos
 # ============================================
+
+DOMAIN_ARG=""
+EMAIL_ARG=""
+SKIP_SSL=false
+ASSUME_YES=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --domain) DOMAIN_ARG="$2"; shift 2 ;;
+        --email)  EMAIL_ARG="$2"; shift 2 ;;
+        --skip-ssl) SKIP_SSL=true; shift ;;
+        --yes|-y) ASSUME_YES=true; shift ;;
+        *) log_error "Argumento desconhecido: $1"; exit 1 ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -35,358 +49,508 @@ cd "$PROJECT_DIR"
 
 DATA_HOME="/var/lib/duart-panel"
 CONFIG_FILE="$DATA_HOME/settings/config.json"
+ACME_WEBROOT="/var/www/acme"
+SERVICE_NAME="duart-panel"
+
+# ============================================
+# 1. Instalação existente
+# ============================================
+
 EXISTING_INSTALL=false
 EXISTING_PORT=""
 EXISTING_DOMAIN=""
 
+read_config_key() {
+    node -e "try{const c=require('$CONFIG_FILE');process.stdout.write(String(c['$1']??''))}catch(e){}" 2>/dev/null || true
+}
+
 if [[ -f "$CONFIG_FILE" ]]; then
-    EXISTING_PORT=$(node -e "try{const c=require('$CONFIG_FILE');console.log(c.port||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
-    EXISTING_DOMAIN=$(node -e "try{const c=require('$CONFIG_FILE');console.log(c.domain||'')}catch(e){console.log('')}" 2>/dev/null || echo "")
     EXISTING_INSTALL=true
+    EXISTING_PORT="$(read_config_key port)"
+    EXISTING_DOMAIN="$(read_config_key domain)"
 fi
 
 echo ""
 echo "========================================"
-echo "   Duart Panel - Instalacao"
-if $EXISTING_INSTALL; then
-    echo "   (REPARO - instalacao existente detectada)"
-fi
+echo "   Duart Panel"
+$EXISTING_INSTALL && echo "   (reparo — instalação existente)"
 echo "========================================"
 echo ""
 
-if $EXISTING_INSTALL; then
-    log_info "Instalação existente detectada:"
-    echo "       Domínio: ${EXISTING_DOMAIN:-N/A}"
-    echo "       Porta:   ${EXISTING_PORT:-N/A}"
-    echo "       Dados:   $DATA_HOME"
-    echo ""
-    log_info "Modo REPARO: apenas etapas faltantes serão executadas."
-    log_info "Porta e domínio existentes serão REUTILIZADOS."
-    echo ""
-fi
-
 # ============================================
-# 2. DOMÍNIO
+# 2. Domínio
 # ============================================
 
-if $EXISTING_INSTALL && [[ -n "$EXISTING_DOMAIN" ]]; then
+if [[ -n "$DOMAIN_ARG" ]]; then
+    DOMAIN="$DOMAIN_ARG"
+elif $EXISTING_INSTALL && [[ -n "$EXISTING_DOMAIN" ]]; then
     DOMAIN="$EXISTING_DOMAIN"
-    log_skip "Domínio: $DOMAIN (reutilizado da instalação existente)"
+    log_skip "Domínio: $DOMAIN (reutilizado)"
+elif [[ -t 0 ]]; then
+    read -rp "Domínio do painel (ex.: painel.exemplo.com): " DOMAIN
 else
-    read -p "Digite o dominio para o painel (ex: painel.meudominio.com): " DOMAIN
-    if [[ -z "$DOMAIN" ]]; then
-        log_error "Domínio é obrigatório"
-        exit 1
-    fi
-    log_info "Domínio: $DOMAIN"
+    log_error "Sem terminal interativo. Informe --domain <dominio>."
+    exit 1
 fi
 
+[[ -z "$DOMAIN" ]] && { log_error "Domínio é obrigatório"; exit 1; }
+EMAIL="${EMAIL_ARG:-admin@$DOMAIN}"
+log_info "Domínio: $DOMAIN"
+
 # ============================================
-# 3. NODE.JS 22 VIA NVM
+# 3. Node.js
 # ============================================
+# Instalado pelo apt (NodeSource), não por nvm.
+#
+# Com nvm, o binário fica em /root/.nvm/versions/... e o PATH do systemd não
+# inclui esse caminho — o painel não voltava depois de um reboot, que é o pior
+# momento possível para a ferramenta de administração sumir.
 
 log_info "Verificando Node.js..."
-export NVM_DIR="$HOME/.nvm"
 
-if [[ -s "$NVM_DIR/nvm.sh" ]]; then
-    source "$NVM_DIR/nvm.sh"
+NODE_OK=false
+if command -v node &>/dev/null; then
+    NODE_MAJOR="$(node -v | sed 's/^v\([0-9]*\).*/\1/')"
+    if [[ "$NODE_MAJOR" -ge 20 ]]; then
+        NODE_OK=true
+        log_skip "Node.js $(node -v) já instalado"
+    else
+        log_warn "Node.js $(node -v) é antigo — o Next.js 16 exige 20.9+"
+    fi
 fi
 
-NEED_NVM=false
-if [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
-    NEED_NVM=true
-fi
-
-if $NEED_NVM; then
-    log_info "Instalando NVM..."
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-    source "$NVM_DIR/nvm.sh"
-fi
-
-if ! nvm ls 22 &>/dev/null; then
-    log_info "Instalando Node.js 22 via NVM..."
-    nvm install 22
-    nvm use 22
-    nvm alias default 22
-    log_ok "Node.js $(node -v) instalado"
-else
-    nvm use 22 2>/dev/null || true
-    log_skip "Node.js $(node -v) já instalado"
-fi
-
-# ============================================
-# 4. NGINX
-# ============================================
-
-log_info "Verificando NGINX..."
-if command -v nginx &>/dev/null; then
-    log_skip "NGINX já instalado ($(nginx -v 2>&1 | cut -d'/' -f2))"
-else
-    log_info "Instalando NGINX..."
+if ! $NODE_OK; then
+    log_info "Instalando Node.js 22 via NodeSource..."
     apt-get update -qq
-    apt-get install -y -qq nginx
-    systemctl enable nginx
-    systemctl start nginx
-    log_ok "NGINX instalado"
+    apt-get install -y -qq curl ca-certificates gnupg
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y -qq nodejs
+    log_ok "Node.js $(node -v) instalado"
 fi
+
+NODE_BIN="$(command -v node)"
+
+# ============================================
+# 4. Dependências do sistema
+# ============================================
+
+log_info "Verificando pacotes do sistema..."
+MISSING_PKGS=()
+for pkg in nginx ufw openssl; do
+    command -v "$pkg" &>/dev/null || MISSING_PKGS+=("$pkg")
+done
+
+if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
+    apt-get update -qq
+    apt-get install -y -qq "${MISSING_PKGS[@]}"
+    log_ok "Instalados: ${MISSING_PKGS[*]}"
+else
+    log_skip "nginx, ufw e openssl já presentes"
+fi
+
+systemctl enable --now nginx >/dev/null 2>&1 || true
 
 # ============================================
 # 5. UFW
 # ============================================
 
-log_info "Verificando UFW..."
-if ! command -v ufw &>/dev/null; then
-    apt-get install -y -qq ufw
-fi
-
-# UFW rules são idempotentes (ufw allow não duplica)
-ufw --force default deny incoming
-ufw --force default allow outgoing
-ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
-ufw allow 587/tcp comment 'SMTP' 2>/dev/null || true
-ufw allow 80/tcp comment 'HTTP' 2>/dev/null || true
-ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || true
-ufw --force enable
-log_ok "UFW configurado"
+log_info "Configurando firewall..."
+ufw --force default deny incoming >/dev/null
+ufw --force default allow outgoing >/dev/null
+for rule in "22/tcp:SSH" "80/tcp:HTTP" "443/tcp:HTTPS" "587/tcp:SMTP"; do
+    ufw allow "${rule%%:*}" comment "${rule##*:}" >/dev/null 2>&1 || true
+done
+ufw --force enable >/dev/null
+log_ok "UFW ativo (22, 80, 443, 587)"
 
 # ============================================
-# 6. PORTA (REUSAR SE EXISTENTE)
+# 6. Porta interna
 # ============================================
 
-if $EXISTING_INSTALL && [[ -n "$EXISTING_PORT" ]]; then
+if $EXISTING_INSTALL && [[ -n "$EXISTING_PORT" && "$EXISTING_PORT" != "0" ]]; then
     PORT="$EXISTING_PORT"
-    log_skip "Porta: $PORT (reutilizada da instalação existente)"
+    log_skip "Porta: $PORT (reutilizada)"
 else
-    log_info "Elegendo porta aleatória..."
     while true; do
         PORT=$((10000 + RANDOM % 50000))
-        if ! ss -tuln | grep -q ":${PORT} "; then
-            break
-        fi
+        ss -tuln | grep -q ":${PORT} " || break
     done
-    log_ok "Porta: $PORT"
+    log_ok "Porta interna: $PORT"
 fi
 
 # ============================================
-# 7. DIRETÓRIOS
+# 7. Diretórios
 # ============================================
 
-log_info "Verificando estrutura de diretórios..."
-mkdir -p "$DATA_HOME"/{auth,cpu-history,network-history,nginx,ssl,cron,backups,settings,firewall,logs}
+log_info "Criando estrutura de diretórios..."
+mkdir -p "$DATA_HOME"/{auth,cpu-history,network-history,nginx/maintenance,ssl,cron,backups,settings,firewall,logs,ai/journal,ai/sessions,python/env}
 mkdir -p /etc/ssl/duart-panel/certs
+mkdir -p /etc/nginx/snippets /etc/nginx/conf.d
+mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
+mkdir -p /var/log/php /var/lib/php/sessions /run/duart
 
-# Link simbólico data/ -> /var/lib/duart-panel/
+chmod 750 "$DATA_HOME" "$DATA_HOME/auth"
+chmod 755 "$ACME_WEBROOT"
+log_ok "Diretórios prontos"
+
 if [[ -L "$PROJECT_DIR/data" ]]; then
-    log_skip "Link simbólico data/ já existe"
+    log_skip "Link data/ já existe"
 else
-    if [[ -d "$PROJECT_DIR/data" ]] && [[ ! -L "$PROJECT_DIR/data" ]]; then
-        log_warn "data/ é um diretório real, será substituído por link simbólico"
-        rm -rf "$PROJECT_DIR/data"
-    fi
-    ln -sf "$DATA_HOME" "$PROJECT_DIR/data"
-    log_ok "Link simbólico data/ → $DATA_HOME"
+    [[ -d "$PROJECT_DIR/data" ]] && rm -rf "$PROJECT_DIR/data"
+    ln -sfn "$DATA_HOME" "$PROJECT_DIR/data"
+    log_ok "Link data/ → $DATA_HOME"
 fi
 
 # ============================================
-# 8. DEPENDÊNCIAS NPM
+# 8. Dependências e build
 # ============================================
+# `npm install --production` omitia as devDependencies — e tailwindcss,
+# @tailwindcss/postcss e typescript estão todas lá. O PostCSS não resolvia o
+# plugin do Tailwind e o build da linha seguinte falhava; como a saída passava
+# por `| tail`, o código de saída era descartado e o script seguia adiante.
 
-log_info "Instalando dependências npm..."
-npm install --production 2>&1 | tail -3
+log_info "Instalando dependências (isso pode levar alguns minutos)..."
+if [[ -f package-lock.json ]]; then
+    npm ci --no-audit --no-fund
+else
+    npm install --no-audit --no-fund
+fi
 log_ok "Dependências instaladas"
 
-# ============================================
-# 9. BUILD
-# ============================================
-
-log_info "Build da aplicação (Next.js)..."
-npm run build 2>&1 | tail -5
+log_info "Compilando a aplicação..."
+npm run build
 log_ok "Build concluído"
 
 # ============================================
-# 10. PM2 (parar anterior, iniciar novo)
+# 9. Serviço systemd
 # ============================================
+# systemd no lugar do PM2 para o próprio painel: sobrevive a reboot sem
+# depender de `pm2 resurrect` nem do PATH do nvm, e o log vai para o journal.
 
-log_info "Verificando PM2..."
-if ! command -v pm2 &>/dev/null; then
-    npm install -g pm2
-    log_ok "PM2 instalado"
-else
-    log_skip "PM2 já instalado"
+log_info "Configurando serviço systemd..."
+
+cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNITEOF
+# Duart Panel — gerado por scripts/install.sh
+[Unit]
+Description=Duart Panel
+Documentation=https://github.com/duart/duart-panel
+After=network.target nginx.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${PROJECT_DIR}
+Environment=NODE_ENV=production
+Environment=PORT=${PORT}
+Environment=DATA_DIR=${DATA_HOME}
+ExecStart=${NODE_BIN} ${PROJECT_DIR}/node_modules/.bin/next start -p ${PORT}
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=duart-panel
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+
+systemctl daemon-reload
+systemctl enable "${SERVICE_NAME}" >/dev/null
+
+# PM2 do painel deixa de ser necessário; remove para não subir duas instâncias
+# disputando a mesma porta.
+if command -v pm2 &>/dev/null && pm2 list 2>/dev/null | grep -q "duart-panel"; then
+    log_info "Removendo instância antiga do PM2..."
+    pm2 delete duart-panel >/dev/null 2>&1 || true
+    pm2 save >/dev/null 2>&1 || true
 fi
 
-# Parar processo anterior se existir
-if pm2 list 2>/dev/null | grep -q "duart-panel"; then
-    log_info "Parando processo duart-panel existente..."
-    pm2 stop duart-panel 2>/dev/null || true
-    pm2 delete duart-panel 2>/dev/null || true
-fi
+systemctl restart "${SERVICE_NAME}"
+sleep 2
 
-cat > ecosystem.config.js << PM2EOF
-module.exports = {
-  apps: [{
-    name: 'duart-panel',
-    script: 'node_modules/.bin/next',
-    args: 'start -p $PORT',
-    cwd: '$(pwd)',
-    env: { NODE_ENV: 'production', PORT: '$PORT' },
-    max_memory_restart: '512M',
-  }]
-};
-PM2EOF
-
-pm2 start ecosystem.config.js
-pm2 save
-pm2 startup systemd -u root --hp /root 2>/dev/null || true
-log_ok "Next.js iniciado via PM2 na porta $PORT (páginas + API)"
-
-# ============================================
-# 11. CONFIGURAÇÃO (merge, não sobrescrever)
-# ============================================
-
-log_info "Salvando configuração..."
-
-mkdir -p "$DATA_HOME/settings"
-
-if $EXISTING_INSTALL && [[ -f "$CONFIG_FILE" ]]; then
-    # Atualizar apenas campos que podem ter mudado, preservar o resto
-    node -e "
-        const fs = require('fs');
-        const config = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf-8'));
-        config.port = $PORT;
-        config.domain = '$DOMAIN';
-        config.serverName = config.serverName || 'Duart Panel';
-        config.hostname = config.hostname || '$(hostname)';
-        config.language = config.language || 'pt-BR';
-        config.aiModel = config.aiModel || 'deepseek-chat';
-        config.theme = config.theme || 'dark';
-        config.nginxStubStatus = config.nginxStubStatus !== false;
-        config.sslAutoRenew = config.sslAutoRenew !== false;
-        config.sslRenewDaysBefore = config.sslRenewDaysBefore || 5;
-        config.backupRetentionCount = config.backupRetentionCount || 10;
-        config.installedModules = config.installedModules || { mysql: false, postgresql: false, mongodb: false, docker: false, fail2ban: false, certbot: false };
-        config.updatedAt = '$(date -Iseconds)';
-        fs.writeFileSync('$CONFIG_FILE', JSON.stringify(config, null, 2));
-    " 2>/dev/null
-    log_skip "Configuração atualizada (preservando dados existentes)"
+if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    log_ok "Serviço ativo na porta $PORT"
 else
-    cat > "$CONFIG_FILE" << CONFEOF
-{
-  "serverName": "Duart Panel",
-  "hostname": "$(hostname)",
-  "language": "pt-BR",
-  "aiApiKey": "",
-  "aiModel": "deepseek-chat",
-  "theme": "dark",
-  "port": $PORT,
-  "domain": "$DOMAIN",
-  "nginxStubStatus": true,
-  "sslAutoRenew": true,
-  "sslRenewDaysBefore": 5,
-  "backupRetentionCount": 10,
-  "installedAt": "$(date -Iseconds)",
-  "installedModules": { "mysql": false, "postgresql": false, "mongodb": false, "docker": false, "fail2ban": false, "certbot": false }
-}
-CONFEOF
-    log_ok "Configuração inicial criada"
-fi
-
-# ============================================
-# 12. NGINX VHOST
-# ============================================
-
-log_info "Configurando NGINX vhost..."
-NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
-
-cat > "$NGINX_CONF" << NGINXEOF
-# Duart Panel - $DOMAIN
-# NGINX como proxy reverso para Next.js na porta $PORT
-# $(date)
-
-server {
-    listen 80;
-    server_name $DOMAIN;
-
-    access_log /var/log/nginx/$DOMAIN-access.log;
-    error_log  /var/log/nginx/$DOMAIN-error.log;
-
-    # Let's Encrypt ACME challenge (servido localmente, sem proxy)
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:$PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 86400;
-        proxy_buffering off;
-    }
-}
-NGINXEOF
-
-ln -sf "$NGINX_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
-rm -f /etc/nginx/sites-enabled/default
-
-if nginx -t 2>/dev/null; then
-    nginx -s reload
-    log_ok "NGINX configurado (proxy total para porta $PORT)"
-else
-    log_error "Configuração NGINX inválida!"
-    nginx -t
+    log_error "O serviço não subiu. Diagnóstico:"
+    journalctl -u "${SERVICE_NAME}" -n 30 --no-pager
     exit 1
 fi
 
 # ============================================
-# 13. SSL (Let's Encrypt) — apenas se não existir
+# 10. Configuração
 # ============================================
 
-CERTBOT_CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+log_info "Gravando configuração..."
+mkdir -p "$DATA_HOME/settings"
 
-if [[ -d "$CERTBOT_CERT_DIR" ]] && [[ -f "$CERTBOT_CERT_DIR/fullchain.pem" ]]; then
-    log_skip "SSL já configurado para $DOMAIN"
-    SSL_ENABLED=true
+node -e "
+const fs = require('fs');
+const file = '$CONFIG_FILE';
+let config = {};
+try { config = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch {}
+
+config.port = $PORT;
+config.domain = '$DOMAIN';
+config.serverName ??= 'Duart Panel';
+config.hostname ??= '$(hostname)';
+config.language ??= 'pt-BR';
+config.aiModel ??= 'deepseek-chat';
+config.aiProvider ??= 'deepseek';
+config.aiDefaultMode ??= 'assisted';
+config.theme ??= 'dark';
+config.sslContactEmail ||= '$EMAIL';
+config.sslAutoRenew = config.sslAutoRenew !== false;
+config.sslRenewDaysBefore ||= 30;
+config.backupRetentionCount ||= 10;
+config.fileManagerRoots ??= [];
+config.installedModules ??= {};
+config.installedAt ??= new Date().toISOString();
+config.updatedAt = new Date().toISOString();
+
+fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o640 });
+"
+log_ok "Configuração salva (dados existentes preservados)"
+
+# ============================================
+# 11. Snippets do NGINX
+# ============================================
+
+log_info "Instalando snippets compartilhados do NGINX..."
+
+cat > /etc/nginx/snippets/duart-acme.conf <<'ACMEEOF'
+# Duart Panel — desafio ACME (Let's Encrypt)
+location ^~ /.well-known/acme-challenge/ {
+    root /var/www/acme;
+    default_type "text/plain";
+    allow all;
+    auth_basic off;
+    try_files $uri =404;
+}
+ACMEEOF
+
+cat > /etc/nginx/snippets/duart-ssl.conf <<'SSLEOF'
+# Duart Panel — parâmetros TLS compartilhados
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+ssl_prefer_server_ciphers off;
+ssl_ecdh_curve X25519:prime256v1:secp384r1;
+ssl_session_cache shared:DuartSSL:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;
+ssl_stapling on;
+ssl_stapling_verify on;
+resolver 127.0.0.53 1.1.1.1 valid=300s;
+resolver_timeout 5s;
+SSLEOF
+
+cat > /etc/nginx/snippets/duart-gzip.conf <<'GZIPEOF'
+# Duart Panel — compressão
+gzip on;
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 5;
+gzip_min_length 256;
+gzip_types
+    text/plain text/css text/xml text/javascript
+    application/json application/javascript application/xml
+    application/rss+xml application/atom+xml
+    image/svg+xml font/woff font/woff2;
+GZIPEOF
+
+cat > /etc/nginx/snippets/duart-proxy.conf <<'PROXYEOF'
+# Duart Panel — cabeçalhos de proxy reverso
+proxy_http_version 1.1;
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Forwarded-Port $server_port;
+proxy_redirect off;
+PROXYEOF
+
+[[ -f /etc/nginx/conf.d/duart-ratelimit.conf ]] || cat > /etc/nginx/conf.d/duart-ratelimit.conf <<'RLEOF'
+# Duart Panel — zonas de rate limit
+limit_req_zone $binary_remote_addr zone=duart_default:10m rate=30r/s;
+RLEOF
+
+log_ok "Snippets instalados"
+
+# ============================================
+# 12. vhost do painel
+# ============================================
+# Detecta SSL pelo próprio vhost, e não pela existência do diretório do certbot.
+# Antes, reexecutar o instalador sobrescrevia o bloco SSL, via que o diretório
+# do certificado existia, concluía "SSL já configurado" e imprimia https:// no
+# resumo — deixando o painel em HTTP e dizendo o contrário.
+
+NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
+HAS_SSL_BLOCK=false
+if [[ -f "$NGINX_CONF" ]] && grep -q "ssl_certificate" "$NGINX_CONF"; then
+    HAS_SSL_BLOCK=true
+fi
+
+if [[ -f "$NGINX_CONF" ]]; then
+    cp -a "$NGINX_CONF" "${NGINX_CONF}.bak-$(date +%Y%m%d%H%M%S)"
+fi
+
+# IPv6 só entra se a máquina tiver a stack ativa; senão o nginx recusa a config.
+LISTEN6_80=""
+LISTEN6_443=""
+if [[ -f /proc/net/if_inet6 ]]; then
+    LISTEN6_80="    listen [::]:80;"
+    LISTEN6_443="    listen [::]:443 ssl;"
+fi
+
+write_http_vhost() {
+    cat > "$NGINX_CONF" <<VHOSTEOF
+# Duart Panel — $DOMAIN
+# Gerado por scripts/install.sh em $(date -Iseconds)
+
+server {
+    listen 80;
+$LISTEN6_80
+    server_name $DOMAIN;
+
+    access_log /var/log/nginx/$DOMAIN.access.log;
+    error_log  /var/log/nginx/$DOMAIN.error.log;
+
+    include snippets/duart-acme.conf;
+
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        include snippets/duart-proxy.conf;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_buffering off;
+    }
+}
+VHOSTEOF
+}
+
+if $HAS_SSL_BLOCK; then
+    log_skip "vhost com TLS preservado (apenas a porta interna foi conferida)"
+    # Mantém o bloco existente e só corrige a porta do upstream, se mudou.
+    sed -i -E "s#proxy_pass http://127\.0\.0\.1:[0-9]+#proxy_pass http://127.0.0.1:$PORT#g" "$NGINX_CONF"
 else
-    log_info "Configurando SSL automaticamente..."
-    if bash "$SCRIPT_DIR/setup-ssl.sh" "$DOMAIN" "admin@$DOMAIN" 2>&1; then
-        log_ok "SSL configurado com sucesso!"
+    write_http_vhost
+    log_ok "vhost HTTP gravado"
+fi
+
+ln -sfn "$NGINX_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
+rm -f /etc/nginx/sites-enabled/default
+
+if NGINX_TEST_OUTPUT="$(nginx -t 2>&1)"; then
+    systemctl reload nginx
+    log_ok "NGINX recarregado"
+else
+    log_error "Configuração NGINX inválida:"
+    echo "$NGINX_TEST_OUTPUT" >&2
+    LATEST_BAK="$(ls -t "${NGINX_CONF}.bak-"* 2>/dev/null | head -1 || true)"
+    if [[ -n "$LATEST_BAK" ]]; then
+        cp -a "$LATEST_BAK" "$NGINX_CONF"
+        nginx -t && systemctl reload nginx
+        log_warn "Backup restaurado a partir de $LATEST_BAK"
+    fi
+    exit 1
+fi
+
+# ============================================
+# 13. SSL
+# ============================================
+
+SSL_ENABLED=false
+if $HAS_SSL_BLOCK; then
+    SSL_ENABLED=true
+    log_skip "TLS já configurado para $DOMAIN"
+elif $SKIP_SSL; then
+    log_skip "SSL ignorado (--skip-ssl)"
+else
+    log_info "Configurando TLS..."
+    SSL_ARGS=("$DOMAIN" "--email" "$EMAIL" "--yes")
+    if bash "$SCRIPT_DIR/setup-ssl.sh" "${SSL_ARGS[@]}"; then
         SSL_ENABLED=true
     else
-        log_warn "Falha ao configurar SSL. O painel funcionará em HTTP."
-        log_warn "Execute 'sudo bash scripts/setup-ssl.sh $DOMAIN' manualmente depois."
-        SSL_ENABLED=false
+        log_warn "TLS não pôde ser configurado agora. O painel segue em HTTP."
+        log_warn "Depois de conferir o DNS, rode: sudo bash scripts/setup-ssl.sh $DOMAIN"
     fi
 fi
 
 # ============================================
-# 14. RESUMO
+# 14. Renovação automática
+# ============================================
+# Um único renovador: o certbot.timer que já vem com o pacote. O painel apenas
+# observa, através de um deploy-hook que só executa quando um certificado é de
+# fato substituído.
+
+if command -v certbot &>/dev/null; then
+    log_info "Configurando o gancho de renovação..."
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+
+    cat > /etc/letsencrypt/renewal-hooks/deploy/duart-panel.sh <<'HOOKEOF'
+#!/usr/bin/env bash
+# Duart Panel — executado pelo certbot quando um certificado é renovado.
+set -euo pipefail
+
+LOG="/var/lib/duart-panel/logs/ssl-renewal.log"
+mkdir -p "$(dirname "$LOG")"
+
+{
+    echo "[$(date -Iseconds)] Renovado: ${RENEWED_LINEAGE:-desconhecido}"
+    echo "[$(date -Iseconds)] Domínios: ${RENEWED_DOMAINS:-desconhecidos}"
+
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx && echo "[$(date -Iseconds)] NGINX recarregado"
+    else
+        echo "[$(date -Iseconds)] ATENÇÃO: nginx -t falhou; reload não executado"
+    fi
+} >> "$LOG" 2>&1
+HOOKEOF
+
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/duart-panel.sh
+
+    # Remove os renovadores concorrentes que a versão anterior instalava: com
+    # três processos chamando `certbot renew`, eles disputavam o lock e falhavam
+    # de forma intermitente.
+    rm -f /etc/cron.d/duart-panel-ssl
+
+    systemctl enable --now certbot.timer >/dev/null 2>&1 || true
+    log_ok "Renovação a cargo do certbot.timer, com gancho de reload do NGINX"
+fi
+
+# ============================================
+# 15. Script de recuperação
+# ============================================
+# Antes, o README anunciava a instalação do recover e o script nunca era
+# copiado — ele só existia via `npm run recover`, que exige o repositório
+# íntegro e o npm funcionando, justamente o que pode faltar numa recuperação.
+
+install -m 0755 "$SCRIPT_DIR/recover.sh" /usr/local/sbin/duart-recover
+log_ok "Recuperação disponível em: duart-recover"
+
+# ============================================
+# 16. Resumo
 # ============================================
 
 echo ""
 echo "========================================"
 if $EXISTING_INSTALL; then
-    echo -e "   ${GREEN}Reparo Concluido!${NC}"
+    echo -e "   ${GREEN}Reparo concluído${NC}"
 else
-    echo -e "   ${GREEN}Instalacao Concluida!${NC}"
+    echo -e "   ${GREEN}Instalação concluída${NC}"
 fi
 echo "========================================"
 echo ""
-if [[ "${SSL_ENABLED:-false}" == "true" ]]; then
-    echo -e "  URL:        ${BLUE}https://$DOMAIN${NC}"
+if $SSL_ENABLED; then
+    echo -e "  URL:       ${BLUE}https://$DOMAIN${NC}"
 else
-    echo -e "  URL:        ${BLUE}http://$DOMAIN${NC}"
+    echo -e "  URL:       ${BLUE}http://$DOMAIN${NC}"
+    echo -e "  ${YELLOW}TLS pendente: sudo bash scripts/setup-ssl.sh $DOMAIN${NC}"
 fi
-echo -e "  Next.js:    porta ${BLUE}$PORT${NC} (NGINX → proxy reverso total)"
-echo -e "  PM2:        ${BLUE}pm2 status${NC}"
+echo -e "  Serviço:   ${BLUE}systemctl status $SERVICE_NAME${NC}"
+echo -e "  Logs:      ${BLUE}journalctl -u $SERVICE_NAME -f${NC}"
+echo -e "  Recuperar: ${BLUE}duart-recover${NC}"
 echo ""
-if [[ "${SSL_ENABLED:-false}" != "true" ]]; then
-    echo -e "  ${YELLOW}SSL nao configurado. Execute: sudo bash scripts/setup-ssl.sh $DOMAIN${NC}"
-    echo ""
-fi
-echo -e "  ${YELLOW}Acesse e crie seu usuario admin${NC}"
+echo -e "  ${YELLOW}Acesse a URL e crie o usuário administrador.${NC}"
 echo ""

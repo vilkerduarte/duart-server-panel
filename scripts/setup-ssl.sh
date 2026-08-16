@@ -1,269 +1,299 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # ============================================
-# Duart Panel - Setup SSL (Let's Encrypt)
-# Usage: sudo bash scripts/setup-ssl.sh <domain> [email]
+# Duart Panel — TLS via Let's Encrypt
+# Uso: sudo bash scripts/setup-ssl.sh <dominio> [--email a@b.c] [--yes] [--staging]
 # ============================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_warn()  { echo -e "${YELLOW}[AVISO]${NC} $1"; }
+log_error() { echo -e "${RED}[ERRO]${NC} $1" >&2; }
 
 if [[ $EUID -ne 0 ]]; then
-   log_error "Este script deve ser executado como root (use sudo)"
-   exit 1
+    log_error "Execute como root (sudo)"
+    exit 1
 fi
 
-# --- Argumentos ---
-DOMAIN="${1:-}"
-EMAIL="${2:-admin@$DOMAIN}"
+DOMAIN=""
+EMAIL=""
+ASSUME_YES=false
+STAGING=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --email) EMAIL="$2"; shift 2 ;;
+        --yes|-y) ASSUME_YES=true; shift ;;
+        --staging) STAGING=true; shift ;;
+        -*) log_error "Argumento desconhecido: $1"; exit 1 ;;
+        *) DOMAIN="$1"; shift ;;
+    esac
+done
 
 if [[ -z "$DOMAIN" ]]; then
-    log_error "Uso: sudo bash scripts/setup-ssl.sh <dominio> [email]"
+    log_error "Uso: sudo bash scripts/setup-ssl.sh <dominio> [--email a@b.c] [--yes]"
     exit 1
 fi
 
-log_info "Configurando SSL para: $DOMAIN"
-log_info "Email: $EMAIL"
+EMAIL="${EMAIL:-admin@$DOMAIN}"
 
-# --- Detect paths ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="${DATA_DIR:-/var/lib/duart-panel}"
 CONFIG_FILE="$DATA_DIR/settings/config.json"
-SSL_CERTS_FILE="$DATA_DIR/ssl/certificates.json"
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
-SSL_CERTS_DIR="/etc/ssl/duart-panel/certs"
-CERTBOT_CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+ACME_WEBROOT="/var/www/acme"
 
-# --- Ler porta do config ---
+log_info "Domínio: $DOMAIN"
+log_info "Contato: $EMAIL"
+
+# --- Porta interna do painel ---
 PORT="3000"
 if [[ -f "$CONFIG_FILE" ]]; then
-    PORT=$(node -e "try{const c=require('$CONFIG_FILE');console.log(c.port||3000)}catch(e){console.log(3000)}")
+    PORT="$(node -e "try{const c=require('$CONFIG_FILE');process.stdout.write(String(c.port||3000))}catch(e){process.stdout.write('3000')}" 2>/dev/null || echo 3000)"
 fi
-log_info "Porta da API: $PORT"
 
-# --- Instalar certbot se necessário ---
-log_info "Verificando certbot..."
-
-CERTBOT_INSTALLED=false
-if command -v certbot &>/dev/null; then
-    log_ok "Certbot já instalado"
-    CERTBOT_INSTALLED=true
-else
+# --- certbot ---
+if ! command -v certbot &>/dev/null; then
     log_info "Instalando certbot..."
     apt-get update -qq
-    apt-get install -y -qq certbot python3-certbot-nginx 2>&1 | tail -3
-    log_ok "Certbot instalado"
-    CERTBOT_INSTALLED=true
+    apt-get install -y -qq certbot
+    log_ok "certbot instalado"
 fi
 
-# --- Verificar se NGINX está rodando ---
 if ! systemctl is-active --quiet nginx; then
-    log_error "NGINX não está rodando. Inicie o NGINX primeiro."
+    log_error "O NGINX não está rodando. Inicie-o antes de emitir o certificado."
     exit 1
 fi
 
-# --- Emitir certificado ---
-log_info "Emitindo certificado SSL via Let's Encrypt..."
+# --- Webroot ACME ---
+# Um diretório único para todos os domínios, servido por um snippet incluído em
+# todos os vhosts. Antes cada emissão apontava para /var/www/html ou para a raiz
+# do site, e o desafio falhava sempre que os dois não coincidiam.
+mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
+chmod -R 755 "$ACME_WEBROOT"
+echo "duart-panel-acme-ok" > "$ACME_WEBROOT/.well-known/acme-challenge/.probe"
 
-# Verificar se já existe
-if [[ -d "$CERTBOT_CERT_DIR" ]]; then
-    log_warn "Certificado já existe em $CERTBOT_CERT_DIR"
-    read -p "Deseja renovar/reemitir? (s/N): " RENEW
-    if [[ "$RENEW" =~ ^[Ss]$ ]]; then
-        log_info "Renovando certificado..."
-        certbot renew --cert-name "$DOMAIN" --force-renewal 2>&1 || {
-            log_error "Falha na renovação. Tentando emitir novo..."
-            certbot certonly --webroot -w /var/www/html \
-                -d "$DOMAIN" \
-                --non-interactive --agree-tos \
-                --email "$EMAIL" 2>&1
-        }
+if [[ ! -f /etc/nginx/snippets/duart-acme.conf ]]; then
+    log_info "Instalando o snippet de desafio ACME..."
+    mkdir -p /etc/nginx/snippets
+    cat > /etc/nginx/snippets/duart-acme.conf <<'ACMEEOF'
+location ^~ /.well-known/acme-challenge/ {
+    root /var/www/acme;
+    default_type "text/plain";
+    allow all;
+    auth_basic off;
+    try_files $uri =404;
+}
+ACMEEOF
+fi
+
+if [[ -f "$NGINX_CONF" ]] && ! grep -q "duart-acme.conf" "$NGINX_CONF"; then
+    log_warn "O vhost não inclui o snippet ACME; a validação pode falhar."
+    log_warn "Adicione 'include snippets/duart-acme.conf;' ao bloco da porta 80."
+fi
+
+nginx -t >/dev/null 2>&1 && systemctl reload nginx
+
+# --- Pré-checagem de alcance ---
+# O erro mais comum é o domínio não apontar para esta máquina. Descobrir isso
+# aqui é bem mais barato do que gastar uma tentativa do rate limit do Let's Encrypt.
+log_info "Verificando se o desafio é alcançável..."
+if command -v curl &>/dev/null; then
+    PROBE="$(curl -fsS --max-time 10 "http://$DOMAIN/.well-known/acme-challenge/.probe" 2>/dev/null || true)"
+    if [[ "$PROBE" != "duart-panel-acme-ok" ]]; then
+        log_warn "Não foi possível ler o desafio em http://$DOMAIN/.well-known/acme-challenge/"
+        log_warn "Verifique: (1) o DNS aponta para este servidor? (2) a porta 80 está aberta?"
+        log_warn "  (3) existe registro AAAA sem o servidor escutar em IPv6?"
+        if ! $ASSUME_YES; then
+            if [[ -t 0 ]]; then
+                read -rp "Continuar mesmo assim? (s/N): " CONTINUE
+                [[ "$CONTINUE" =~ ^[SsYy]$ ]] || exit 1
+            else
+                log_error "Abortando. Use --yes para tentar assim mesmo."
+                exit 1
+            fi
+        fi
+    else
+        log_ok "Desafio alcançável"
     fi
-else
-    # Criar diretório webroot se não existir
-    mkdir -p /var/www/html
+fi
+rm -f "$ACME_WEBROOT/.well-known/acme-challenge/.probe"
 
-    certbot certonly --webroot -w /var/www/html \
-        -d "$DOMAIN" \
-        --non-interactive --agree-tos \
-        --email "$EMAIL" 2>&1
+# --- Emissão ---
+# --cert-name fixo torna o caminho da lineage previsível. Sem ele, uma reemissão
+# cria "<dominio>-0001" e o vhost passa a apontar para um diretório inexistente.
+CERTBOT_ARGS=(
+    certonly --webroot -w "$ACME_WEBROOT"
+    --cert-name "$DOMAIN"
+    -d "$DOMAIN"
+    --non-interactive --agree-tos
+    --email "$EMAIL"
+    --key-type ecdsa
+)
+$STAGING && CERTBOT_ARGS+=(--staging)
+
+if [[ -d "/etc/letsencrypt/live/$DOMAIN" ]]; then
+    log_info "Lineage existente encontrada; renovando se necessário..."
+    CERTBOT_ARGS+=(--keep-until-expiring)
 fi
 
-if [[ ! -f "$CERTBOT_CERT_DIR/fullchain.pem" ]]; then
-    log_error "Falha ao emitir certificado. Verifique:"
-    log_error "  1. O domínio $DOMAIN resolve para este servidor?"
-    log_error "  2. A porta 80 está acessível publicamente?"
+log_info "Emitindo certificado..."
+if ! certbot "${CERTBOT_ARGS[@]}"; then
+    log_error "O certbot falhou. Últimas linhas do log:"
+    tail -n 20 /var/log/letsencrypt/letsencrypt.log 2>/dev/null || true
     exit 1
 fi
 
-log_ok "Certificado emitido com sucesso!"
+# --- Caminhos reais ---
+CERT_PATH="$(certbot certificates --cert-name "$DOMAIN" 2>/dev/null | awk '/Certificate Path:/{print $3}' | head -1)"
+KEY_PATH="$(certbot certificates --cert-name "$DOMAIN" 2>/dev/null | awk '/Private Key Path:/{print $4}' | head -1)"
 
-# --- Criar symlinks no diretório gerenciado ---
-log_info "Registrando certificado..."
-mkdir -p "$SSL_CERTS_DIR/$DOMAIN"
-ln -sf "$CERTBOT_CERT_DIR/fullchain.pem" "$SSL_CERTS_DIR/$DOMAIN/fullchain.pem" 2>/dev/null || true
-ln -sf "$CERTBOT_CERT_DIR/privkey.pem"  "$SSL_CERTS_DIR/$DOMAIN/privkey.pem"  2>/dev/null || true
-
-# --- Atualizar NGINX config com SSL ---
-log_info "Atualizando configuração NGINX..."
-
-if [[ ! -f "$NGINX_CONF" ]]; then
-    log_error "Configuração NGINX não encontrada: $NGINX_CONF"
+if [[ -z "$CERT_PATH" || ! -f "$CERT_PATH" ]]; then
+    log_error "Certificado emitido, mas o caminho não pôde ser determinado."
     exit 1
 fi
 
-# Fazer backup da config atual
-cp "$NGINX_CONF" "${NGINX_CONF}.bak-$(date +%Y%m%d%H%M%S)"
+VALID_UNTIL="$(openssl x509 -in "$CERT_PATH" -noout -enddate | cut -d= -f2)"
+log_ok "Certificado válido até: $VALID_UNTIL"
 
-SSL_CERT_PATH="$SSL_CERTS_DIR/$DOMAIN/fullchain.pem"
-SSL_KEY_PATH="$SSL_CERTS_DIR/$DOMAIN/privkey.pem"
+# --- vhost com TLS ---
+[[ -f "$NGINX_CONF" ]] && cp -a "$NGINX_CONF" "${NGINX_CONF}.bak-$(date +%Y%m%d%H%M%S)"
 
-cat > "$NGINX_CONF" << NGINXEOF
-# Duart Panel - $DOMAIN (com SSL)
-# NGINX como proxy reverso para Next.js na porta $PORT
-# Gerado em $(date)
+LISTEN6_80=""
+LISTEN6_443=""
+if [[ -f /proc/net/if_inet6 ]]; then
+    LISTEN6_80="    listen [::]:80;"
+    LISTEN6_443="    listen [::]:443 ssl;"
+fi
 
-# Redirecionamento HTTP → HTTPS
+cat > "$NGINX_CONF" <<VHOSTEOF
+# Duart Panel — $DOMAIN (TLS)
+# Gerado por scripts/setup-ssl.sh em $(date -Iseconds)
+
 server {
     listen 80;
+$LISTEN6_80
     server_name $DOMAIN;
 
-    # Let's Encrypt ACME challenge (renovação)
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
+    include snippets/duart-acme.conf;
 
     location / {
-        return 301 https://\$server_name\$request_uri;
+        return 301 https://\$host\$request_uri;
     }
 }
 
-# HTTPS (proxy reverso total para Next.js)
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+$LISTEN6_443
+    http2 on;
     server_name $DOMAIN;
 
-    ssl_certificate     $SSL_CERT_PATH;
-    ssl_certificate_key $SSL_KEY_PATH;
+    ssl_certificate     $CERT_PATH;
+    ssl_certificate_key $KEY_PATH;
+    include snippets/duart-ssl.conf;
 
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-    ssl_prefer_server_ciphers on;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
-    access_log /var/log/nginx/$DOMAIN-access.log;
-    error_log  /var/log/nginx/$DOMAIN-error.log;
+    access_log /var/log/nginx/$DOMAIN.access.log;
+    error_log  /var/log/nginx/$DOMAIN.error.log;
 
-    # Let's Encrypt ACME challenge (servido localmente)
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
+    include snippets/duart-acme.conf;
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;
-        proxy_http_version 1.1;
+        include snippets/duart-proxy.conf;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 86400;
         proxy_buffering off;
     }
 }
-NGINXEOF
+VHOSTEOF
 
-# --- Validar e recarregar NGINX ---
-log_info "Validando configuração NGINX..."
-if nginx -t 2>/dev/null; then
-    nginx -s reload
-    log_ok "NGINX recarregado com SSL"
+ln -sfn "$NGINX_CONF" "/etc/nginx/sites-enabled/$DOMAIN"
+
+# --- Validação com rollback ---
+# A versão anterior tinha `local LATEST_BAK=...` fora de função aqui: o bash
+# aborta com "local: can only be used in a function", e com `set -e` o script
+# morria exatamente no caminho de recuperação, deixando o vhost quebrado.
+log_info "Validando a configuração do NGINX..."
+if NGINX_OUTPUT="$(nginx -t 2>&1)"; then
+    systemctl reload nginx
+    log_ok "NGINX recarregado com TLS"
 else
-    log_error "Configuração NGINX inválida! Restaurando backup..."
-    local LATEST_BAK=$(ls -t "${NGINX_CONF}.bak-"* 2>/dev/null | head -1)
+    log_error "Configuração inválida:"
+    echo "$NGINX_OUTPUT" >&2
+
+    LATEST_BAK="$(ls -t "${NGINX_CONF}.bak-"* 2>/dev/null | head -1 || true)"
     if [[ -n "$LATEST_BAK" ]]; then
-        cp "$LATEST_BAK" "$NGINX_CONF"
-        nginx -s reload
-        log_warn "Configuração restaurada do backup"
+        cp -a "$LATEST_BAK" "$NGINX_CONF"
+        if nginx -t >/dev/null 2>&1; then
+            systemctl reload nginx
+            log_warn "Configuração anterior restaurada de $LATEST_BAK"
+        else
+            log_error "A configuração continua inválida após o rollback. Rode: duart-recover"
+        fi
     fi
     exit 1
 fi
 
-# --- Registrar certificado no painel ---
-log_info "Registrando no painel..."
+# --- Registro no painel ---
+# O registro é feito por merge, nunca sobrescrevendo o arquivo inteiro: a versão
+# anterior gravava um array com um único certificado, apagando todos os demais.
+log_info "Registrando o certificado no painel..."
+node "$SCRIPT_DIR/register-cert.js" \
+    --domain "$DOMAIN" \
+    --cert "$CERT_PATH" \
+    --key "$KEY_PATH" \
+    --cert-name "$DOMAIN" || log_warn "Certificado emitido, mas o registro no painel falhou."
 
-CERT_ID=$(node -e "try{const{ v4 }=require('uuid');console.log(v4())}catch(e){console.log(Date.now().toString())}")
+node -e "
+const fs = require('fs');
+const file = '$CONFIG_FILE';
+try {
+  const config = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  config.installedModules = config.installedModules || {};
+  config.installedModules.certbot = true;
+  config.sslAutoRenew = true;
+  config.sslContactEmail = config.sslContactEmail || '$EMAIL';
+  fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
+} catch {}
+" 2>/dev/null || true
 
-mkdir -p "$DATA_DIR/ssl"
-
-cat > "$SSL_CERTS_FILE" << CERTEOF
+# --- Renovação ---
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+if [[ ! -f /etc/letsencrypt/renewal-hooks/deploy/duart-panel.sh ]]; then
+    cat > /etc/letsencrypt/renewal-hooks/deploy/duart-panel.sh <<'HOOKEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG="/var/lib/duart-panel/logs/ssl-renewal.log"
+mkdir -p "$(dirname "$LOG")"
 {
-  "certificates": [
-    {
-      "id": "$CERT_ID",
-      "domains": ["$DOMAIN"],
-      "type": "letsencrypt",
-      "method": "http",
-      "issuer": "Let's Encrypt",
-      "validFrom": "$(date -Iseconds)",
-      "validUntil": "$(date -Iseconds -d '+90 days' 2>/dev/null || date -Iseconds)",
-      "certPath": "$SSL_CERT_PATH",
-      "keyPath": "$SSL_KEY_PATH",
-      "chainPath": null,
-      "autoRenew": true,
-      "renewDaysBefore": 5,
-      "associatedSites": [],
-      "createdAt": "$(date -Iseconds)"
-    }
-  ]
-}
-CERTEOF
-
-# --- Atualizar config.json ---
-if [[ -f "$CONFIG_FILE" ]]; then
-    node -e "
-        const fs = require('fs');
-        const config = JSON.parse(fs.readFileSync('$CONFIG_FILE', 'utf-8'));
-        config.sslAutoRenew = true;
-        config.sslRenewDaysBefore = 5;
-        config.installedModules = config.installedModules || {};
-        config.installedModules.certbot = true;
-        fs.writeFileSync('$CONFIG_FILE', JSON.stringify(config, null, 2));
-    " 2>/dev/null || true
+    echo "[$(date -Iseconds)] Renovado: ${RENEWED_LINEAGE:-desconhecido}"
+    nginx -t 2>/dev/null && systemctl reload nginx && echo "[$(date -Iseconds)] NGINX recarregado"
+} >> "$LOG" 2>&1
+HOOKEOF
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/duart-panel.sh
 fi
 
-log_ok "Certificado registrado (ID: $CERT_ID)"
-
-# --- Configurar cron job de renovação ---
-log_info "Configurando renovação automática..."
-CERTBOT_RENEW_CRON="/etc/cron.d/duart-panel-ssl"
-cat > "$CERTBOT_RENEW_CRON" << CRONEOF
-# Duart Panel - SSL Auto Renewal (diário às 03:00)
-0 3 * * * root certbot renew --quiet --post-hook "nginx -s reload" >> /var/lib/duart-panel/logs/ssl-renewal.log 2>&1
-CRONEOF
-chmod 644 "$CERTBOT_RENEW_CRON"
-log_ok "Cron job de renovação configurado"
+# Um só renovador: o timer do pacote. O cron antigo do painel disputava o lock
+# do certbot com ele e falhava de forma intermitente.
+rm -f /etc/cron.d/duart-panel-ssl
+systemctl enable --now certbot.timer >/dev/null 2>&1 || true
 
 echo ""
 echo "========================================"
-echo -e "   ${GREEN}SSL Configurado com Sucesso!${NC}"
+echo -e "   ${GREEN}TLS configurado${NC}"
 echo "========================================"
 echo ""
-echo -e "  Domínio:    ${BLUE}$DOMAIN${NC}"
 echo -e "  URL:        ${BLUE}https://$DOMAIN${NC}"
-echo -e "  Certificado: ${BLUE}$CERTBOT_CERT_DIR${NC}"
-echo -e "  Expira em:  90 dias"
-echo -e "  Renovação:  automática (diária às 03:00)"
+echo -e "  Certificado: ${BLUE}$CERT_PATH${NC}"
+echo -e "  Válido até:  ${BLUE}$VALID_UNTIL${NC}"
+echo -e "  Renovação:   ${BLUE}certbot.timer${NC} (com reload automático do NGINX)"
 echo ""

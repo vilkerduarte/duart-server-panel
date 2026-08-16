@@ -1,65 +1,65 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
 import path from 'path';
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import { resolveSafePath } from '@/lib/paths';
+import { respondWithError, configuredRoots, methodNotAllowed } from '@/lib/api-helpers';
 
-// Max file size for reading: 5MB
 const MAX_READ_SIZE = 5 * 1024 * 1024;
 
-// Text file extensions
 const TEXT_EXTENSIONS = new Set([
-  '.txt', '.log', '.json', '.xml', '.yml', '.yaml', '.md', '.csv',
-  '.js', '.ts', '.jsx', '.tsx', '.css', '.scss', '.html', '.htm',
-  '.conf', '.cfg', '.ini', '.env', '.sh', '.bash', '.zsh',
-  '.py', '.rb', '.php', '.java', '.c', '.cpp', '.h', '.hpp',
-  '.sql', '.graphql', '.vue', '.svelte',
+  '.txt', '.log', '.json', '.xml', '.yml', '.yaml', '.md', '.csv', '.toml',
+  '.js', '.mjs', '.cjs', '.ts', '.jsx', '.tsx', '.css', '.scss', '.html', '.htm',
+  '.conf', '.cfg', '.ini', '.env', '.sh', '.bash', '.zsh', '.service', '.socket', '.timer',
+  '.py', '.rb', '.php', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
+  '.sql', '.graphql', '.vue', '.svelte', '.lock', '.pem', '.crt', '.key',
 ]);
 
+/** Arquivos de configuração sem extensão que o painel precisa abrir. */
+const TEXT_BASENAMES = new Set([
+  'Dockerfile', 'Makefile', 'nginx.conf', 'sshd_config', 'crontab',
+  'hosts', 'fstab', 'requirements.txt', 'Procfile', 'default',
+]);
+
+function looksTextual(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  if (TEXT_EXTENSIONS.has(ext)) return true;
+  if (TEXT_BASENAMES.has(path.basename(filePath))) return true;
+  // Vhosts do NGINX normalmente não têm extensão.
+  return filePath.startsWith('/etc/nginx/sites-') || !ext;
+}
+
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  if (req.method !== 'GET') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
-  }
+  if (req.method !== 'GET') return methodNotAllowed(res);
 
   try {
     const filePath = (req.query.path as string) || '';
-    if (!filePath) {
-      return res.status(400).json({ success: false, error: 'Caminho é obrigatório' });
-    }
+    if (!filePath) return res.status(400).json({ success: false, error: 'Caminho é obrigatório' });
 
-    const resolvedPath = path.resolve('/', filePath);
+    const resolved = resolveSafePath(filePath, { allowedRoots: configuredRoots() });
 
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ success: false, error: 'Arquivo não encontrado' });
-    }
-
-    const stat = fs.statSync(resolvedPath);
+    const stat = fs.statSync(resolved);
     if (stat.isDirectory()) {
       return res.status(400).json({ success: false, error: 'O caminho é um diretório' });
     }
-
-    // Check file size
     if (stat.size > MAX_READ_SIZE) {
-      return res.status(400).json({ success: false, error: 'Arquivo muito grande (máx. 5MB)' });
+      return res.status(400).json({ success: false, error: 'Arquivo maior que 5MB' });
     }
-
-    // Check if it's a text file
-    const ext = path.extname(resolvedPath).toLowerCase();
-    if (!TEXT_EXTENSIONS.has(ext)) {
+    if (!looksTextual(resolved)) {
       return res.status(400).json({ success: false, error: 'Tipo de arquivo não suportado para leitura' });
     }
 
-    const content = fs.readFileSync(resolvedPath, 'utf-8');
+    const buffer = fs.readFileSync(resolved);
+    // Um NUL no início é o sinal mais barato de binário.
+    if (buffer.subarray(0, 8000).includes(0)) {
+      return res.status(400).json({ success: false, error: 'O arquivo parece ser binário' });
+    }
 
     return res.status(200).json({
       success: true,
-      data: {
-        path: resolvedPath,
-        content,
-        size: stat.size,
-        encoding: 'utf-8',
-      },
+      data: { path: resolved, content: buffer.toString('utf-8'), size: stat.size, encoding: 'utf-8' },
     });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+  } catch (err) {
+    return respondWithError(res, err);
   }
 });

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Button from '@/components/ui/Button';
 import Input from '@/components/ui/Input';
 import Select from '@/components/ui/Select';
+import { usePhpVersions } from '@/lib/hooks/usePhpVersions';
 import Modal from '@/components/ui/Modal';
 import SslConfigModal from './SslConfigModal';
 import { useToast } from '@/lib/contexts/ToastContext';
@@ -38,7 +39,8 @@ export default function SiteEditModal({ open, onClose, onSubmit, site, onSslUpda
   const [listenPort, setListenPort] = useState('');
 
   // PHP
-  const [phpVersion, setPhpVersion] = useState('8.3');
+  const phpVersions = usePhpVersions();
+  const [phpVersion, setPhpVersion] = useState('');
 
   // SSL
   const [hasSsl, setHasSsl] = useState(false);
@@ -67,7 +69,7 @@ export default function SiteEditModal({ open, onClose, onSubmit, site, onSslUpda
       setWebsocket(site.websocket || false);
       setAliases((site.aliases || []).join(', '));
       setListenPort(site.listenPort || '');
-      setPhpVersion(site.phpVersion || '8.3');
+      setPhpVersion(site.phpVersion || phpVersions.preferred || '');
       setHasSsl(site.ssl || false);
       setSslCertId(site.sslCertId || '');
       setHstsMaxAge(site.hstsMaxAge ? String(site.hstsMaxAge) : '');
@@ -226,22 +228,22 @@ export default function SiteEditModal({ open, onClose, onSubmit, site, onSslUpda
                 </div>
               ) : (
                 <>
-                  <Select label="Versão do PHP" value={phpVersion} onChange={e => setPhpVersion(e.target.value)}
-                    options={[
-                      { value: '5.6', label: 'PHP 5.6' },
-                      { value: '7.0', label: 'PHP 7.0' },
-                      { value: '7.1', label: 'PHP 7.1' },
-                      { value: '7.2', label: 'PHP 7.2' },
-                      { value: '7.3', label: 'PHP 7.3' },
-                      { value: '7.4', label: 'PHP 7.4' },
-                      { value: '8.0', label: 'PHP 8.0' },
-                      { value: '8.1', label: 'PHP 8.1' },
-                      { value: '8.2', label: 'PHP 8.2' },
-                      { value: '8.3', label: 'PHP 8.3' },
-                    ]} />
-                  <div className="text-xs text-[var(--text-muted)] bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
-                    Certifique-se de que a versão PHP selecionada está instalada no servidor e o socket PHP-FPM correspondente existe em /var/run/php/.
-                  </div>
+                  {phpVersions.hasAny ? (
+                    <>
+                      <Select label="Versão do PHP" value={phpVersion} onChange={e => setPhpVersion(e.target.value)}
+                        options={phpVersions.versions} />
+                      <div className="text-xs text-[var(--text-muted)] bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
+                        Só aparecem as versões instaladas neste servidor. O site recebe um pool FPM
+                        dedicado — usuário próprio, socket próprio e limites próprios — em vez de
+                        dividir o pool <span className="font-mono">www</span> com os demais.
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+                      Nenhuma versão de PHP-FPM instalada neste servidor. Instale pela tela de PHP
+                      antes de salvar — senão o site responderá 502.
+                    </div>
+                  )}
                 </>
               )}
             </div>

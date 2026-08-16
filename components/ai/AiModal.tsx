@@ -1,17 +1,75 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { HiOutlinePaperAirplane, HiOutlineXMark, HiOutlineTrash, HiOutlinePlay, HiOutlineShieldCheck, HiOutlineSparkles } from 'react-icons/hi2';
+import {
+  HiOutlinePaperAirplane, HiOutlineXMark, HiOutlinePlus, HiOutlineEye,
+  HiOutlineShieldCheck, HiOutlineBolt, HiOutlineWrenchScrewdriver,
+  HiOutlineCheck, HiOutlineExclamationTriangle, HiOutlineClock,
+} from 'react-icons/hi2';
 import Spinner from '@/components/ui/Spinner';
 
-interface Message {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: string;
+type Mode = 'read' | 'assisted' | 'autonomous';
+
+interface PendingApproval {
+  toolCallId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  preview: string;
+  previewType: 'command' | 'diff' | 'text';
+  risk: 'write' | 'irreversible';
+  summary: string;
 }
 
-interface PendingCommand {
-  command: string;
-  description: string;
+type Entry =
+  | { kind: 'user'; text: string }
+  | { kind: 'assistant'; text: string }
+  | { kind: 'tool'; name: string; ok: boolean | null; summary: string }
+  | { kind: 'approval'; pending: PendingApproval[]; resolved: boolean }
+  | { kind: 'error'; text: string };
+
+/** Envelope dos eventos SSE; o campo `type` decide como ler o resto. */
+interface StreamEvent {
+  type: string;
+  content?: string;
+  sessionId?: string;
+  title?: string;
+  mode?: Mode;
+  name?: string;
+  summary?: string;
+  ok?: boolean;
+  pending?: PendingApproval[];
 }
+
+interface StoredMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+interface SessionSummary {
+  id: string;
+  title: string;
+  updatedAt: string;
+  hasPending: boolean;
+}
+
+const MODES: Array<{ value: Mode; label: string; hint: string; icon: typeof HiOutlineEye }> = [
+  {
+    value: 'read',
+    label: 'Leitura',
+    hint: 'Só diagnostica. Nenhuma alteração no servidor.',
+    icon: HiOutlineEye,
+  },
+  {
+    value: 'assisted',
+    label: 'Assistido',
+    hint: 'Lê à vontade; cada alteração mostra o efeito e pede sua aprovação.',
+    icon: HiOutlineShieldCheck,
+  },
+  {
+    value: 'autonomous',
+    label: 'Autônomo',
+    hint: 'Executa a tarefa inteira. Só para no que é irreversível.',
+    icon: HiOutlineBolt,
+  },
+];
 
 interface AiModalProps {
   open: boolean;
@@ -19,74 +77,67 @@ interface AiModalProps {
 }
 
 export default function AiModal({ open, onClose }: AiModalProps) {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: 'assistant',
-      content: 'Olá! Sou o assistente IA do Duart Panel, especializado em administração de servidores Linux. Posso ajudar com diagnóstico, configuração, e monitoramento do seu servidor. O que você precisa?',
-      timestamp: new Date().toISOString(),
-    },
-  ]);
+  const [entries, setEntries] = useState<Entry[]>([]);
   const [input, setInput] = useState('');
+  const [mode, setMode] = useState<Mode>('assisted');
   const [streaming, setStreaming] = useState(false);
-  const [pendingCommand, setPendingCommand] = useState<PendingCommand | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [showSessions, setShowSessions] = useState(false);
+
   const chatRef = useRef<HTMLDivElement>(null);
-  const streamingContentRef = useRef('');
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    if (chatRef.current) {
-      chatRef.current.scrollTop = chatRef.current.scrollHeight;
-    }
-  }, [messages]);
+    if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  }, [entries]);
 
-  // Stream real response from the API
-  const handleSend = async () => {
-    if (!input.trim() || streaming) return;
+  const loadSessions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/ai/sessions');
+      const json = await res.json();
+      if (json.success) setSessions(json.data);
+    } catch {}
+  }, []);
 
-    const userMsg: Message = { role: 'user', content: input, timestamp: new Date().toISOString() };
-    setMessages(prev => [...prev, userMsg]);
-    setInput('');
+  useEffect(() => { if (open) loadSessions(); }, [open, loadSessions]);
+
+  /**
+   * Consome o stream de eventos do servidor.
+   *
+   * O mesmo endpoint atende tanto uma mensagem nova quanto a retomada depois de
+   * uma aprovação — o servidor guarda o estado da chamada pendente, então basta
+   * reenviar as decisões para o laço continuar de onde parou.
+   */
+  const runStream = useCallback(async (body: Record<string, unknown>) => {
     setStreaming(true);
-    streamingContentRef.current = '';
-
-    // Add a placeholder for the streaming response
-    const placeholderIndex = messages.length + 1;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const resp = await fetch('/api/ai/chat', {
+      const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [
-            ...messages.map(m => ({ role: m.role, content: m.content })),
-            { role: 'user', content: input },
-          ],
-        }),
+        body: JSON.stringify({ mode, sessionId, ...body }),
+        signal: controller.signal,
       });
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Erro desconhecido' }));
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: `❌ Erro: ${err.error || 'Falha na comunicação'}`,
-          timestamp: new Date().toISOString(),
-        }]);
-        setStreaming(false);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Falha na comunicação' }));
+        setEntries(prev => [...prev, { kind: 'error', text: err.error ?? 'Falha na comunicação' }]);
         return;
       }
 
-      const reader = resp.body?.getReader();
+      const reader = res.body?.getReader();
       if (!reader) {
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: '❌ Erro: Resposta inválida do servidor',
-          timestamp: new Date().toISOString(),
-        }]);
-        setStreaming(false);
+        setEntries(prev => [...prev, { kind: 'error', text: 'Resposta inválida do servidor' }]);
         return;
       }
 
       const decoder = new TextDecoder();
       let buffer = '';
+      let assistantOpen = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -94,321 +145,420 @@ export default function AiModal({ open, onClose }: AiModalProps) {
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
+          if (!line.startsWith('data: ')) continue;
 
-              if (data.type === 'chunk') {
-                streamingContentRef.current += data.content;
-                // Update or add the assistant message
-                setMessages(prev => {
-                  const copy = [...prev];
-                  const lastIdx = copy.length - 1;
-                  if (copy[lastIdx]?.role === 'assistant' && copy[lastIdx]?.content && !copy[lastIdx]?.content.startsWith('❌')) {
-                    // Update existing streaming message
-                    copy[lastIdx] = { ...copy[lastIdx], content: streamingContentRef.current };
-                  } else {
-                    // Add new streaming message
-                    copy.push({
-                      role: 'assistant',
-                      content: streamingContentRef.current,
-                      timestamp: new Date().toISOString(),
-                    });
-                  }
-                  return copy;
-                });
-              } else if (data.type === 'done') {
-                // Finalize with the full content
-                const finalContent = data.fullContent || streamingContentRef.current;
-                setMessages(prev => {
-                  const copy = [...prev];
-                  const lastIdx = copy.length - 1;
-                  if (copy[lastIdx]?.role === 'assistant') {
-                    copy[lastIdx] = { ...copy[lastIdx], content: finalContent };
-                  }
-                  return copy;
-                });
+          let event: StreamEvent;
+          try {
+            event = JSON.parse(line.slice(6)) as StreamEvent;
+          } catch {
+            continue;
+          }
 
-                // Check for command blocks in the response
-                checkForCommands(finalContent);
-              } else if (data.type === 'error') {
-                setMessages(prev => [...prev, {
-                  role: 'assistant',
-                  content: `❌ ${data.content}`,
-                  timestamp: new Date().toISOString(),
-                }]);
-              }
-            } catch {}
+          switch (event.type) {
+            case 'session':
+              setSessionId(event.sessionId ?? null);
+              break;
+
+            case 'chunk':
+              setEntries(prev => {
+                const copy = [...prev];
+                const last = copy[copy.length - 1];
+                const chunk = event.content ?? '';
+                if (assistantOpen && last?.kind === 'assistant') {
+                  copy[copy.length - 1] = { kind: 'assistant', text: last.text + chunk };
+                } else {
+                  assistantOpen = true;
+                  copy.push({ kind: 'assistant', text: chunk });
+                }
+                return copy;
+              });
+              break;
+
+            case 'tool_start':
+              assistantOpen = false;
+              setEntries(prev => [...prev, { kind: 'tool', name: event.name ?? '?', ok: null, summary: event.summary ?? '' }]);
+              break;
+
+            case 'tool_result':
+              setEntries(prev => {
+                const copy = [...prev];
+                for (let i = copy.length - 1; i >= 0; i--) {
+                  const entry = copy[i];
+                  if (entry.kind === 'tool' && entry.name === event.name && entry.ok === null) {
+                    copy[i] = { kind: 'tool', name: entry.name, ok: event.ok ?? false, summary: event.summary ?? '' };
+                    break;
+                  }
+                }
+                return copy;
+              });
+              break;
+
+            case 'approval_required':
+              assistantOpen = false;
+              setEntries(prev => [...prev, { kind: 'approval', pending: event.pending ?? [], resolved: false }]);
+              break;
+
+            case 'error':
+              setEntries(prev => [...prev, { kind: 'error', text: event.content ?? 'Erro desconhecido' }]);
+              break;
           }
         }
       }
-    } catch (err: any) {
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `❌ Erro de conexão: ${err.message}`,
-        timestamp: new Date().toISOString(),
-      }]);
-    }
-
-    setStreaming(false);
-  };
-
-  // Check for command blocks and ask for approval
-  const checkForCommands = (content: string) => {
-    const cmdRegex = /```command\s*\n([\s\S]*?)```/g;
-    const matches = [...content.matchAll(cmdRegex)];
-    if (matches.length > 0) {
-      const lastCmd = matches[matches.length - 1][1].trim();
-      if (lastCmd) {
-        setPendingCommand({
-          command: lastCmd,
-          description: 'A IA sugere executar este comando no servidor. Deseja aprovar?',
-        });
+    } catch (err) {
+      const isAbort = err instanceof DOMException && err.name === 'AbortError';
+      if (!isAbort) {
+        const message = err instanceof Error ? err.message : 'Erro de conexão';
+        setEntries(prev => [...prev, { kind: 'error', text: message }]);
       }
+    } finally {
+      setStreaming(false);
+      loadSessions();
     }
+  }, [mode, sessionId, loadSessions]);
+
+  const send = () => {
+    const text = input.trim();
+    if (!text || streaming) return;
+    setInput('');
+    setEntries(prev => [...prev, { kind: 'user', text }]);
+    runStream({ message: text });
   };
 
-  // Execute approved command
-  const executeApprovedCommand = async () => {
-    if (!pendingCommand) return;
-
-    try {
-      const resp = await fetch('/api/ai/execute-command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: pendingCommand.command, approved: true }),
-      });
-      const result = await resp.json();
-
-      if (result.success) {
-        const output = result.data.stdout || result.data.stderr || '';
-        setMessages(prev => [...prev, {
-          role: 'system',
-          content: `✅ Comando executado (${result.data.duration}ms):\n\`\`\`\n${output || '(sem saída)'}\n\`\`\``,
-          timestamp: new Date().toISOString(),
-        }]);
-      } else {
-        setMessages(prev => [...prev, {
-          role: 'system',
-          content: `❌ Erro ao executar: ${result.error}`,
-          timestamp: new Date().toISOString(),
-        }]);
-      }
-    } catch (err: any) {
-      setMessages(prev => [...prev, {
-        role: 'system',
-        content: `❌ Erro: ${err.message}`,
-        timestamp: new Date().toISOString(),
-      }]);
-    }
-
-    setPendingCommand(null);
+  const decide = (index: number, decisions: Array<{ toolCallId: string; approved: boolean }>) => {
+    setEntries(prev => {
+      const copy = [...prev];
+      const entry = copy[index];
+      if (entry?.kind === 'approval') copy[index] = { ...entry, resolved: true };
+      return copy;
+    });
+    runStream({ approvals: decisions });
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+  const newConversation = () => {
+    abortRef.current?.abort();
+    setSessionId(null);
+    setEntries([]);
+    setShowSessions(false);
+  };
+
+  const openSession = async (id: string) => {
+    abortRef.current?.abort();
+    const res = await fetch(`/api/ai/sessions/${id}`);
+    const json = await res.json();
+    if (!json.success) return;
+
+    setSessionId(id);
+    setMode(json.data.mode);
+    setEntries((json.data.messages as StoredMessage[]).map(message =>
+      message.role === 'user'
+        ? { kind: 'user' as const, text: message.content }
+        : { kind: 'assistant' as const, text: message.content },
+    ));
+    if (json.data.pending?.length) {
+      setEntries(prev => [...prev, { kind: 'approval', pending: json.data.pending, resolved: false }]);
     }
+    setShowSessions(false);
   };
 
   if (!open) return null;
 
+  const activeMode = MODES.find(m => m.value === mode)!;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative w-full max-w-2xl h-[85vh] bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl shadow-2xl flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-color)] shrink-0">
-          <h2 className="text-lg font-semibold text-[var(--text-primary)] flex items-center gap-2">
-            <HiOutlineSparkles className="w-5 h-5 text-blue-400" />
-            Assistente IA
-          </h2>
-          <div className="flex items-center gap-2">
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+
+      <div className="relative w-full max-w-4xl h-[85vh] bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl shadow-2xl flex flex-col overflow-hidden">
+        {/* Cabeçalho */}
+        <div className="flex items-center gap-3 px-5 py-3 border-b border-[var(--border-color)]">
+          <h2 className="text-base font-semibold">Assistente</h2>
+
+          <div className="flex items-center gap-1 ml-2 p-0.5 rounded-lg bg-[var(--bg-hover)]">
+            {MODES.map(m => {
+              const Icon = m.icon;
+              return (
+                <button
+                  key={m.value}
+                  onClick={() => setMode(m.value)}
+                  title={m.hint}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    mode === m.value
+                      ? 'bg-blue-600 text-white'
+                      : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="ml-auto flex items-center gap-1">
             <button
-              onClick={() => setMessages([messages[0]])}
-              className="p-1 text-[var(--text-muted)] hover:text-red-400"
-              title="Limpar conversa"
+              onClick={() => setShowSessions(v => !v)}
+              className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+              title="Conversas anteriores"
             >
-              <HiOutlineTrash className="w-4 h-4" />
+              <HiOutlineClock className="w-4 h-4" />
             </button>
-            <button onClick={onClose} className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]">
-              <HiOutlineXMark className="w-5 h-5" />
+            <button
+              onClick={newConversation}
+              className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+              title="Nova conversa"
+            >
+              <HiOutlinePlus className="w-4 h-4" />
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+            >
+              <HiOutlineXMark className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* Messages */}
-        <div ref={chatRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div
-                className={`max-w-[85%] rounded-lg px-4 py-3 text-sm ${
-                  msg.role === 'user'
-                    ? 'bg-blue-600 text-white'
-                    : msg.role === 'system'
-                    ? 'bg-amber-600/20 text-amber-300 border border-amber-500/30'
-                    : 'bg-[var(--bg-secondary)] text-[var(--text-primary)] border border-[var(--border-color)]'
-                }`}
-              >
-                <MarkdownContent content={msg.content} />
-                <div className={`text-xs mt-2 ${
-                  msg.role === 'user'
-                    ? 'text-blue-200'
-                    : msg.role === 'system'
-                    ? 'text-amber-400'
-                    : 'text-[var(--text-muted)]'
-                }`}>
-                  {new Date(msg.timestamp).toLocaleTimeString()}
-                </div>
-              </div>
-            </div>
-          ))}
+        <p className="px-5 py-1.5 text-xs text-[var(--text-muted)] border-b border-[var(--border-color)]">
+          {activeMode.hint}
+        </p>
 
-          {streaming && (
-            <div className="flex justify-start">
-              <div className="bg-[var(--bg-secondary)] rounded-lg px-4 py-3 text-sm text-[var(--text-muted)] border border-[var(--border-color)] flex items-center gap-2">
-                <Spinner size="sm" /> Processando...
-              </div>
-            </div>
+        <div className="flex-1 flex overflow-hidden">
+          {showSessions && (
+            <aside className="w-60 border-r border-[var(--border-color)] overflow-y-auto shrink-0">
+              {sessions.length === 0 ? (
+                <p className="p-4 text-xs text-[var(--text-muted)]">Nenhuma conversa salva.</p>
+              ) : sessions.map(session => (
+                <button
+                  key={session.id}
+                  onClick={() => openSession(session.id)}
+                  className={`w-full text-left px-3 py-2.5 border-b border-[var(--border-color)] hover:bg-[var(--bg-hover)] transition-colors ${
+                    session.id === sessionId ? 'bg-[var(--bg-hover)]' : ''
+                  }`}
+                >
+                  <p className="text-xs font-medium truncate">{session.title}</p>
+                  <p className="text-[10px] text-[var(--text-muted)] mt-0.5">
+                    {new Date(session.updatedAt).toLocaleString('pt-BR')}
+                    {session.hasPending && ' · aguardando'}
+                  </p>
+                </button>
+              ))}
+            </aside>
           )}
+
+          {/* Conversa */}
+          <div ref={chatRef} className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-3">
+            {entries.length === 0 && (
+              <div className="text-sm text-[var(--text-muted)] max-w-xl">
+                <p className="mb-3">
+                  Posso inspecionar e operar este servidor: sites, NGINX, certificados, PHP, Python,
+                  serviços, logs e firewall.
+                </p>
+                <p className="mb-2">Alguns exemplos:</p>
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>&quot;Por que o site X está dando 502?&quot;</li>
+                  <li>&quot;Crie um site PHP para loja.exemplo.com com certificado&quot;</li>
+                  <li>&quot;Quais certificados vencem nos próximos 30 dias?&quot;</li>
+                  <li>&quot;O NGINX está com erro de sintaxe? Conserte&quot;</li>
+                </ul>
+              </div>
+            )}
+
+            {entries.map((entry, index) => (
+              <EntryView
+                key={index}
+                entry={entry}
+                onDecide={decisions => decide(index, decisions)}
+                disabled={streaming}
+              />
+            ))}
+
+            {streaming && (
+              <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+                <Spinner /> trabalhando…
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Pending Command Approval */}
-        {pendingCommand && (
-          <div className="mx-4 p-3 bg-amber-600/10 border border-amber-500/30 rounded-lg">
-            <div className="flex items-center gap-2 mb-2">
-              <HiOutlineShieldCheck className="w-4 h-4 text-amber-400" />
-              <span className="text-sm text-amber-300 font-medium">Aprovação Necessária</span>
-            </div>
-            <pre className="text-xs font-mono text-amber-200 bg-black/30 p-2 rounded mb-2 overflow-x-auto">
-              {pendingCommand.command}
-            </pre>
-            <p className="text-xs text-amber-400/70 mb-2">{pendingCommand.description}</p>
-            <div className="flex gap-2">
-              <button
-                onClick={executeApprovedCommand}
-                className="px-3 py-1.5 text-xs rounded bg-green-600 text-white hover:bg-green-500 flex items-center gap-1"
-              >
-                <HiOutlinePlay className="w-3 h-3" /> Executar
-              </button>
-              <button
-                onClick={() => setPendingCommand(null)}
-                className="px-3 py-1.5 text-xs rounded bg-[var(--bg-secondary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] border border-[var(--border-color)]"
-              >
-                Recusar
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Input */}
-        <div className="p-4 border-t border-[var(--border-color)] shrink-0">
-          <div className="flex gap-2">
-            <textarea
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Digite sua mensagem... (Shift+Enter para nova linha)"
-              className="flex-1 px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] resize-none focus:outline-none focus:ring-2 focus:ring-[var(--accent)] min-h-[44px]"
-              rows={2}
-              disabled={streaming}
-            />
-            <button
-              onClick={handleSend}
-              disabled={streaming || !input.trim()}
-              className="self-end p-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-            >
-              <HiOutlinePaperAirplane className="w-5 h-5" />
-            </button>
-          </div>
-          <p className="text-xs text-[var(--text-muted)] mt-2">
-            A IA pode sugerir comandos CLI que precisam da sua aprovação antes de executar.
-          </p>
+        {/* Entrada */}
+        <div className="border-t border-[var(--border-color)] p-3 flex gap-2">
+          <textarea
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            rows={2}
+            placeholder="Descreva a tarefa ou o problema…"
+            className="flex-1 resize-none px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+          />
+          <button
+            onClick={send}
+            disabled={streaming || !input.trim()}
+            className="px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <HiOutlinePaperAirplane className="w-4 h-4" />
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
-// Simple markdown renderer with code highlighting support
-function MarkdownContent({ content }: { content: string }) {
-  if (!content) return null;
+/* ------------------------------------------------------------------ */
 
-  // Render code blocks with ```language ... ```
-  const parts: React.ReactNode[] = [];
-  const regex = /```(\w*)\s*\n([\s\S]*?)```|`([^`]+)`|(\*\*([^*]+)\*\*)|(__([^_]+)__)|(\*([^*]+)\*)|(_([^_]+)_)|(~~([^~]+)~~)/g;
-  let lastIdx = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
+function EntryView({
+  entry, onDecide, disabled,
+}: {
+  entry: Entry;
+  onDecide: (decisions: Array<{ toolCallId: string; approved: boolean }>) => void;
+  disabled: boolean;
+}) {
+  if (entry.kind === 'user') {
+    return (
+      <div className="self-end max-w-[80%] px-3.5 py-2 rounded-2xl rounded-br-sm bg-blue-600 text-white text-sm whitespace-pre-wrap">
+        {entry.text}
+      </div>
+    );
+  }
 
-  while ((match = regex.exec(content)) !== null) {
-    // Text before match
-    if (match.index > lastIdx) {
-      const beforeText = content.slice(lastIdx, match.index);
-      parts.push(<span key={key++}>{renderInlineHtml(beforeText)}</span>);
-    }
+  if (entry.kind === 'assistant') {
+    return <div className="max-w-[90%] text-sm"><Markdown text={entry.text} /></div>;
+  }
 
-    if (match[1] !== undefined) {
-      // Code block: ```lang\ncode```
-      const lang = match[1] || '';
-      const code = match[2];
-      parts.push(
-        <div key={key++} className="my-2 rounded-lg overflow-hidden border border-[var(--border-color)]">
-          {lang && (
-            <div className="px-3 py-1 bg-[var(--bg-hover)] text-xs text-[var(--text-muted)] font-mono">
-              {lang}
-            </div>
-          )}
-          <pre className="p-3 text-xs font-mono text-[var(--text-secondary)] bg-black/30 overflow-x-auto whitespace-pre-wrap">
-            {code}
+  if (entry.kind === 'error') {
+    return (
+      <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-600/10 border border-red-600/30 text-sm text-red-400">
+        <HiOutlineExclamationTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+        {entry.text}
+      </div>
+    );
+  }
+
+  if (entry.kind === 'tool') {
+    return (
+      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)] pl-1">
+        {entry.ok === null
+          ? <Spinner />
+          : entry.ok
+            ? <HiOutlineCheck className="w-3.5 h-3.5 text-green-400" />
+            : <HiOutlineExclamationTriangle className="w-3.5 h-3.5 text-amber-400" />}
+        <HiOutlineWrenchScrewdriver className="w-3.5 h-3.5" />
+        <span className="font-mono">{entry.name}</span>
+        <span className="truncate">— {entry.summary}</span>
+      </div>
+    );
+  }
+
+  // Aprovação
+  const irreversible = entry.pending.some(p => p.risk === 'irreversible');
+
+  return (
+    <div className={`rounded-lg border p-3 flex flex-col gap-3 ${
+      irreversible ? 'border-red-600/40 bg-red-600/5' : 'border-amber-600/40 bg-amber-600/5'
+    }`}>
+      <p className="text-xs font-semibold flex items-center gap-1.5">
+        <HiOutlineExclamationTriangle className={`w-4 h-4 ${irreversible ? 'text-red-400' : 'text-amber-400'}`} />
+        {irreversible
+          ? 'Operação irreversível — confirme antes de aplicar'
+          : 'Aguardando sua aprovação'}
+      </p>
+
+      {entry.pending.map(pending => (
+        <div key={pending.toolCallId} className="flex flex-col gap-1.5">
+          <p className="text-xs font-medium">{pending.summary}</p>
+          <pre className={`text-[11px] font-mono p-2.5 rounded-md overflow-x-auto max-h-64 bg-[var(--bg-hover)] ${
+            pending.previewType === 'diff' ? 'leading-tight' : ''
+          }`}>
+            {pending.previewType === 'diff'
+              ? pending.preview.split('\n').map((line, i) => (
+                  <div key={i} className={
+                    line.startsWith('+') && !line.startsWith('+++') ? 'text-green-400'
+                      : line.startsWith('-') && !line.startsWith('---') ? 'text-red-400'
+                      : line.startsWith('@@') ? 'text-blue-400'
+                      : ''
+                  }>{line || ' '}</div>
+                ))
+              : pending.preview}
           </pre>
         </div>
-      );
-    } else if (match[3] !== undefined) {
-      // Inline code
-      parts.push(
-        <code key={key++} className="px-1.5 py-0.5 text-xs font-mono bg-black/30 text-[var(--text-secondary)] rounded">
-          {match[3]}
-        </code>
-      );
-    } else if (match[5] !== undefined || match[7] !== undefined) {
-      // Bold
-      parts.push(<strong key={key++} className="font-bold">{match[5] || match[7]}</strong>);
-    } else if (match[9] !== undefined || match[11] !== undefined) {
-      // Italic
-      parts.push(<em key={key++} className="italic">{match[9] || match[11]}</em>);
-    } else if (match[13] !== undefined) {
-      // Strikethrough
-      parts.push(<del key={key++} className="line-through">{match[13]}</del>);
-    }
+      ))}
 
-    lastIdx = match.index + match[0].length;
-  }
-
-  // Remaining text
-  if (lastIdx < content.length) {
-    parts.push(<span key={key++}>{renderInlineHtml(content.slice(lastIdx))}</span>);
-  }
-
-  return <div className="whitespace-pre-wrap break-words">{parts.length > 0 ? parts : content}</div>;
+      {!entry.resolved && (
+        <div className="flex gap-2">
+          <button
+            disabled={disabled}
+            onClick={() => onDecide(entry.pending.map(p => ({ toolCallId: p.toolCallId, approved: true })))}
+            className="px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-medium disabled:opacity-40"
+          >
+            Aprovar {entry.pending.length > 1 ? `(${entry.pending.length})` : ''}
+          </button>
+          <button
+            disabled={disabled}
+            onClick={() => onDecide(entry.pending.map(p => ({ toolCallId: p.toolCallId, approved: false })))}
+            className="px-3 py-1.5 rounded-lg border border-[var(--border-color)] hover:bg-[var(--bg-hover)] text-xs font-medium disabled:opacity-40"
+          >
+            Recusar
+          </button>
+        </div>
+      )}
+      {entry.resolved && <p className="text-xs text-[var(--text-muted)]">Decisão registrada.</p>}
+    </div>
+  );
 }
 
-// Render inline HTML (tables, etc.) if the content starts with HTML tags
-function renderInlineHtml(text: string): React.ReactNode {
-  // If text contains HTML table tags, render as raw HTML
-  if (/<(table|thead|tbody|tr|th|td|div|span|br|hr|ul|ol|li|h[1-6]|p|blockquote)/i.test(text)) {
-    return <div dangerouslySetInnerHTML={{ __html: text }} />;
-  }
+/**
+ * Renderizador de markdown mínimo.
+ * Cobre o que o modelo realmente usa (blocos de código, código inline, negrito,
+ * listas) sem trazer uma dependência nem injetar HTML do modelo na página.
+ */
+function Markdown({ text }: { text: string }) {
+  const blocks = text.split(/```/);
 
-  // Handle line breaks and basic formatting
-  return text.split('\n').map((line, i, arr) => (
-    <span key={i}>
-      {line}
-      {i < arr.length - 1 && <br />}
-    </span>
-  ));
+  return (
+    <div className="flex flex-col gap-2">
+      {blocks.map((block, index) => {
+        if (index % 2 === 1) {
+          const newline = block.indexOf('\n');
+          const code = newline === -1 ? block : block.slice(newline + 1);
+          return (
+            <pre key={index} className="text-[11px] font-mono p-2.5 rounded-md bg-[var(--bg-hover)] overflow-x-auto">
+              {code.replace(/\n$/, '')}
+            </pre>
+          );
+        }
+
+        return (
+          <div key={index} className="whitespace-pre-wrap leading-relaxed">
+            {block.split('\n').map((line, lineIndex) => (
+              <div key={lineIndex}>{inline(line)}</div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function inline(line: string) {
+  const parts = line.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code key={index} className="px-1 py-0.5 rounded bg-[var(--bg-hover)] font-mono text-[0.85em]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    return <span key={index}>{part}</span>;
+  });
 }

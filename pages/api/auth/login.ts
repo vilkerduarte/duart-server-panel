@@ -1,18 +1,20 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { readUsers, verifyPassword, generateToken, checkLoginAttempts, recordLoginAttempt } from '@/lib/auth';
+import {
+  readUsers, verifyPassword, generateToken,
+  checkLoginAttempts, recordLoginAttempt, buildSessionCookie,
+} from '@/lib/auth';
+import { isSecureRequest } from '@/lib/middleware/auth';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, error: 'Método não permitido' });
   }
 
-  const { username, password } = req.body;
-
+  const { username, password } = req.body ?? {};
   if (!username || !password) {
     return res.status(400).json({ success: false, error: 'Usuário e senha são obrigatórios' });
   }
 
-  // Check if setup is needed
   const users = readUsers();
   if (users.users.length === 0) {
     return res.status(400).json({
@@ -22,45 +24,37 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
   }
 
-  // Check brute force protection
-  const attemptCheck = checkLoginAttempts(username);
+  const attemptCheck = checkLoginAttempts(username, req.socket.remoteAddress);
   if (!attemptCheck.allowed) {
     return res.status(429).json({
       success: false,
-      error: `Conta bloqueada. Aguarde ${attemptCheck.waitMinutes} minutos.`,
+      error: `Muitas tentativas. Aguarde ${attemptCheck.waitMinutes} minutos.`,
     });
   }
 
-  // Find user
   const user = users.users.find(u => u.username === username);
-  if (!user) {
-    recordLoginAttempt(username, false);
+
+  // Mesmo sem usuário, roda a comparação: o tempo de resposta deixa de revelar
+  // quais nomes de usuário existem.
+  const hash = user?.passwordHash ?? '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidin';
+  const valid = await verifyPassword(password, hash);
+
+  if (!user || !valid) {
+    recordLoginAttempt(username, false, req.socket.remoteAddress);
     return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
   }
 
-  // Verify password
-  const valid = await verifyPassword(password, user.passwordHash);
-  if (!valid) {
-    recordLoginAttempt(username, false);
-    return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
-  }
-
-  // Generate token
-  recordLoginAttempt(username, true);
+  recordLoginAttempt(username, true, req.socket.remoteAddress);
   const token = generateToken(user);
+  const sessionHours = users.settings.sessionDurationHours || 24;
 
-  // Set cookie
-  res.setHeader('Set-Cookie', `token=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`);
+  res.setHeader('Set-Cookie', buildSessionCookie(token, isSecureRequest(req), sessionHours * 3600));
 
   return res.status(200).json({
     success: true,
     data: {
       token,
-      user: {
-        id: user.id,
-        username: user.username,
-        role: user.role,
-      },
+      user: { id: user.id, username: user.username, role: user.role },
     },
   });
 }

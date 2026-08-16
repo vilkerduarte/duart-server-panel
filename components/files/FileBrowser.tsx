@@ -15,6 +15,8 @@ import {
 
 interface FileItem {
   name: string;
+  /** Caminho absoluto vindo da API; evita concatenar e errar na raiz. */
+  path?: string;
   type: 'directory' | 'file' | 'symlink';
   size: number;
   permissions: string;
@@ -381,7 +383,7 @@ export default function FileBrowser({ currentPath, parentPath, items, onNavigate
                     {/* Name */}
                     <td
                       className="p-3 cursor-pointer"
-                      onClick={() => item.type === 'directory' && onNavigate(`${currentPath === '/' ? '' : currentPath}/${item.name}`)}
+                      onClick={() => item.type === 'directory' && onNavigate(item.path ?? `${currentPath === '/' ? '' : currentPath}/${item.name}`)}
                     >
                       {renamingItem === item.name ? (
                         <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>

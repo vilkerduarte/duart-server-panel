@@ -1,299 +1,181 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
-import { executeCommand, executeRaw } from '@/lib/system';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
 import path from 'path';
-
-const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
-const SSL_DIR = path.join(DATA_DIR, 'ssl');
-const CERTS_FILE = path.join(SSL_DIR, 'certificates.json');
-const SSL_CERTS_DIR = '/etc/ssl/duart-panel/certs';
-
-interface Certificate {
-  id: string;
-  domains: string[];
-  type: 'letsencrypt' | 'manual' | 'cloudflare';
-  method?: 'http' | 'dns';
-  issuer: string;
-  validFrom: string;
-  validUntil: string;
-  certPath: string;
-  keyPath: string;
-  chainPath: string | null;
-  autoRenew: boolean;
-  renewDaysBefore: number;
-  associatedSites: string[];
-  createdAt: string;
-}
-
-function ensureDir() {
-  if (!fs.existsSync(SSL_DIR)) fs.mkdirSync(SSL_DIR, { recursive: true });
-  if (!fs.existsSync(CERTS_FILE)) {
-    fs.writeFileSync(CERTS_FILE, JSON.stringify({ certificates: [] }, null, 2));
-  }
-  if (!fs.existsSync(SSL_CERTS_DIR)) {
-    fs.mkdirSync(SSL_CERTS_DIR, { recursive: true });
-  }
-}
-
-function readCerts(): Certificate[] {
-  ensureDir();
-  try {
-    const data = JSON.parse(fs.readFileSync(CERTS_FILE, 'utf-8'));
-    return data.certificates || [];
-  } catch {
-    return [];
-  }
-}
-
-function writeCerts(certs: Certificate[]) {
-  ensureDir();
-  fs.writeFileSync(CERTS_FILE, JSON.stringify({ certificates: certs }, null, 2));
-}
-
-function getCertStatus(validUntil: string): 'valid' | 'expiring_soon' | 'expired' {
-  const now = new Date();
-  const expiry = new Date(validUntil);
-  const daysUntil = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-
-  if (daysUntil < 0) return 'expired';
-  if (daysUntil < 7) return 'expiring_soon';
-  return 'valid';
-}
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import {
+  listCertificates, registerCertificate, removeCertificate, updateCertificate,
+  syncFromCertbot, CertificateInUseError, MANAGED_CERTS_DIR,
+} from '@/lib/certificates';
+import { issueCertificate, readCertMetadata } from '@/lib/ssl';
+import { ensureDir } from '@/lib/fsx';
+import { readConfig } from '@/lib/data/config';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  ensureDir();
+  try {
+    /* ---------------------------- GET ---------------------------- */
 
-  // GET - List all certificates
-  if (req.method === 'GET') {
-    const certs = readCerts();
-    const enriched = certs.map(cert => ({
-      ...cert,
-      status: getCertStatus(cert.validUntil),
-    }));
-    return res.status(200).json({ success: true, data: enriched });
-  }
-
-  // POST - Create/register new certificate
-  if (req.method === 'POST') {
-    const { type, domains, method, email, cert, key, chain, certPath, keyPath, chainPath } = req.body;
-
-    if (!type || !domains || !Array.isArray(domains) || domains.length === 0) {
-      return res.status(400).json({ success: false, error: 'Tipo e domínios são obrigatórios' });
+    if (req.method === 'GET') {
+      // Traz para o registro qualquer lineage emitida fora do painel.
+      if (req.query.sync === 'true') await syncFromCertbot();
+      return res.status(200).json({ success: true, data: await listCertificates() });
     }
 
-    const id = require('uuid').v4();
-    const mainDomain = domains[0].replace(/^\*\./, 'wildcard.');
-    const certDir = path.join(SSL_CERTS_DIR, mainDomain);
+    /* ---------------------------- POST --------------------------- */
 
-    try {
-      // Handle different certificate types
+    if (req.method === 'POST') {
+      const { type, domains, method, email, cert, key, chain, certPath, keyPath, chainPath, dnsProvider, dnsCredentialsPath } = req.body ?? {};
+
+      if (!type || !Array.isArray(domains) || domains.length === 0) {
+        return res.status(400).json({ success: false, error: 'Tipo e domínios são obrigatórios' });
+      }
+
+      /* --- Let's Encrypt --- */
       if (type === 'letsencrypt') {
-        if (!email) {
+        const contactEmail = email || readConfig().sslContactEmail;
+        if (!contactEmail) {
           return res.status(400).json({ success: false, error: 'Email é obrigatório para Let\'s Encrypt' });
         }
 
-        fs.mkdirSync(certDir, { recursive: true });
-
-        // Build certbot command
-        const args = [
-          '--agree-tos',
-          '--non-interactive',
-          '--email', email,
-        ];
-
-        // Add domain arguments
-        for (const domain of domains) {
-          args.push('-d', domain);
-        }
-
-        // Challenge method
-        if (method === 'dns') {
-          args.push('--manual', '--preferred-challenges', 'dns');
-        } else {
-          args.push('--webroot', '-w', '/var/www/html');
-        }
-
-        const result = await executeCommand('certbot_certonly', args);
-
-        if (result.code !== 0) {
-          return res.status(400).json({
-            success: false,
-            error: 'Falha ao emitir certificado: ' + (result.stderr || result.stdout),
-          });
-        }
-
-        // Determine cert paths from certbot output - use REAL Let's Encrypt paths
-        const letsencryptDir = `/etc/letsencrypt/live/${domains[0]}`;
-        const finalCertPath = path.join(letsencryptDir, 'fullchain.pem');
-        const finalKeyPath = path.join(letsencryptDir, 'privkey.pem');
-
-        const cert: Certificate = {
-          id,
+        const result = await issueCertificate({
           domains,
-          type: 'letsencrypt',
-          method: method || 'http',
-          issuer: 'Let\'s Encrypt',
-          validFrom: new Date().toISOString(),
-          validUntil: new Date(Date.now() + 90 * 86400000).toISOString(),
-          certPath: finalCertPath,
-          keyPath: finalKeyPath,
-          chainPath: null,
-          autoRenew: true,
-          renewDaysBefore: 5,
-          associatedSites: [],
-          createdAt: new Date().toISOString(),
-        };
+          email: contactEmail,
+          challenge: method === 'dns' ? 'dns' : 'http',
+          dnsProvider,
+          dnsCredentialsPath,
+        });
 
-        const certs = readCerts();
-        certs.push(cert);
-        writeCerts(certs);
+        if (!result.ok || !result.certPath || !result.keyPath) {
+          return res.status(400).json({ success: false, error: result.error ?? 'Falha ao emitir certificado' });
+        }
+
+        const stored = await registerCertificate({
+          type: 'letsencrypt',
+          certName: result.certName,
+          domains,
+          certPath: result.certPath,
+          keyPath: result.keyPath,
+          method: method === 'dns' ? 'dns' : 'http',
+          autoRenew: true,
+        });
 
         return res.status(200).json({
           success: true,
-          data: { certificate: { ...cert, status: 'valid' } },
+          data: {
+            certificate: {
+              ...stored,
+              validUntil: result.metadata?.validUntil ?? null,
+              daysRemaining: result.metadata?.daysRemaining ?? null,
+              issuer: result.metadata?.issuer ?? null,
+            },
+          },
         });
+      }
 
-      } else if (type === 'manual') {
+      /* --- Certificado colado pelo usuário --- */
+      if (type === 'manual') {
         if (!cert || !key) {
           return res.status(400).json({ success: false, error: 'Certificado e chave privada são obrigatórios' });
         }
 
-        fs.mkdirSync(certDir, { recursive: true });
-        fs.writeFileSync(path.join(certDir, 'cert.pem'), cert);
-        fs.writeFileSync(path.join(certDir, 'privkey.pem'), key);
-        if (chain) fs.writeFileSync(path.join(certDir, 'chain.pem'), chain);
+        const dirName = domains[0].replace(/^\*\./, 'wildcard.').replace(/[^a-zA-Z0-9._-]/g, '_');
+        const certDir = path.join(MANAGED_CERTS_DIR, dirName);
+        ensureDir(certDir, 0o750);
 
-        // Try to parse validity from cert
-        let validUntil = new Date(Date.now() + 365 * 86400000).toISOString();
-        let issuer = 'Manual';
-        try {
-          const parseResult = await executeRaw(`openssl x509 -in "${path.join(certDir, 'cert.pem')}" -noout -enddate -issuer 2>/dev/null`, 5000);
-          const endMatch = parseResult.stdout.match(/notAfter=(.+)/);
-          if (endMatch) validUntil = new Date(endMatch[1].trim()).toISOString();
-          const issuerMatch = parseResult.stdout.match(/issuer=\s*(.+)/);
-          if (issuerMatch) issuer = issuerMatch[1].trim();
-        } catch {}
+        const finalCert = path.join(certDir, 'cert.pem');
+        const finalKey = path.join(certDir, 'privkey.pem');
+        const finalChain = chain ? path.join(certDir, 'chain.pem') : null;
 
-        const newCert: Certificate = {
-          id,
-          domains,
+        fs.writeFileSync(finalCert, cert, { mode: 0o644 });
+        fs.writeFileSync(finalKey, key, { mode: 0o600 });
+        if (finalChain) fs.writeFileSync(finalChain, chain, { mode: 0o644 });
+
+        const metadata = await readCertMetadata(finalCert);
+        if (!metadata) {
+          fs.rmSync(certDir, { recursive: true, force: true });
+          return res.status(400).json({
+            success: false,
+            error: 'O conteúdo enviado não é um certificado X.509 válido.',
+          });
+        }
+
+        const stored = await registerCertificate({
           type: 'manual',
-          issuer,
-          validFrom: new Date().toISOString(),
-          validUntil,
-          certPath: path.join(certDir, 'cert.pem'),
-          keyPath: path.join(certDir, 'privkey.pem'),
-          chainPath: chain ? path.join(certDir, 'chain.pem') : null,
+          domains: metadata.domains.length ? metadata.domains : domains,
+          certPath: finalCert,
+          keyPath: finalKey,
+          chainPath: finalChain,
           autoRenew: false,
-          renewDaysBefore: 5,
-          associatedSites: [],
-          createdAt: new Date().toISOString(),
-        };
-
-        const certs = readCerts();
-        certs.push(newCert);
-        writeCerts(certs);
-
-        return res.status(200).json({
-          success: true,
-          data: { certificate: { ...newCert, status: getCertStatus(validUntil) } },
         });
 
-      } else if (type === 'cloudflare') {
+        return res.status(200).json({
+          success: true,
+          data: { certificate: { ...stored, validUntil: metadata.validUntil, daysRemaining: metadata.daysRemaining, issuer: metadata.issuer } },
+        });
+      }
+
+      /* --- Certificado já presente no disco (Cloudflare Origin etc.) --- */
+      if (type === 'cloudflare') {
         if (!certPath || !keyPath) {
-          return res.status(400).json({ success: false, error: 'Caminhos do certificado e chave são obrigatórios' });
+          return res.status(400).json({ success: false, error: 'Caminhos do certificado e da chave são obrigatórios' });
         }
-
         if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-          return res.status(400).json({ success: false, error: 'Arquivos de certificado não encontrados nos caminhos informados' });
+          return res.status(400).json({ success: false, error: 'Arquivos não encontrados nos caminhos informados' });
         }
 
-        // Try to parse validity
-        let validUntil = new Date(Date.now() + 365 * 86400000).toISOString();
-        let issuer = 'Cloudflare';
-        try {
-          const parseResult = await executeRaw(`openssl x509 -in "${certPath}" -noout -enddate -issuer 2>/dev/null`, 5000);
-          const endMatch = parseResult.stdout.match(/notAfter=(.+)/);
-          if (endMatch) validUntil = new Date(endMatch[1].trim()).toISOString();
-          const issuerMatch = parseResult.stdout.match(/issuer=\s*(.+)/);
-          if (issuerMatch) issuer = issuerMatch[1].trim();
-        } catch {}
+        const metadata = await readCertMetadata(certPath);
+        if (!metadata) {
+          return res.status(400).json({ success: false, error: 'Não foi possível ler o certificado informado' });
+        }
 
-        const newCert: Certificate = {
-          id,
-          domains,
+        const stored = await registerCertificate({
           type: 'cloudflare',
-          issuer,
-          validFrom: new Date().toISOString(),
-          validUntil,
+          domains: metadata.domains.length ? metadata.domains : domains,
           certPath,
           keyPath,
-          chainPath: chainPath || null,
+          chainPath: chainPath ?? null,
           autoRenew: false,
-          renewDaysBefore: 5,
-          associatedSites: [],
-          createdAt: new Date().toISOString(),
-        };
-
-        const certs = readCerts();
-        certs.push(newCert);
-        writeCerts(certs);
+        });
 
         return res.status(200).json({
           success: true,
-          data: { certificate: { ...newCert, status: getCertStatus(validUntil) } },
+          data: { certificate: { ...stored, validUntil: metadata.validUntil, daysRemaining: metadata.daysRemaining, issuer: metadata.issuer } },
         });
       }
 
       return res.status(400).json({ success: false, error: 'Tipo de certificado inválido' });
-
-    } catch (err: any) {
-      // Cleanup on failure
-      if (fs.existsSync(certDir)) {
-        fs.rmSync(certDir, { recursive: true, force: true });
-      }
-      return res.status(500).json({ success: false, error: err.message });
-    }
-  }
-
-  // DELETE - Remove certificate
-  if (req.method === 'DELETE') {
-    const { id } = req.query;
-    if (!id) {
-      return res.status(400).json({ success: false, error: 'ID é obrigatório' });
     }
 
-    const certs = readCerts();
-    const index = certs.findIndex(c => c.id === id);
+    /* ---------------------------- PUT ---------------------------- */
 
-    if (index === -1) {
-      return res.status(404).json({ success: false, error: 'Certificado não encontrado' });
+    if (req.method === 'PUT') {
+      const { id, autoRenew } = req.body ?? {};
+      if (!id) return res.status(400).json({ success: false, error: 'ID é obrigatório' });
+
+      const updated = await updateCertificate(id, { autoRenew: Boolean(autoRenew) });
+      if (!updated) return res.status(404).json({ success: false, error: 'Certificado não encontrado' });
+
+      return res.status(200).json({ success: true, data: updated });
     }
 
-    const cert = certs[index];
+    /* --------------------------- DELETE -------------------------- */
 
-    // Check if associated with any sites
-    if (cert.associatedSites.length > 0) {
-      return res.status(409).json({
-        success: false,
-        error: 'Este certificado está associado a sites. Remova a associação primeiro.',
-      });
-    }
+    if (req.method === 'DELETE') {
+      const id = String(req.query.id ?? '');
+      if (!id) return res.status(400).json({ success: false, error: 'ID é obrigatório' });
 
-    // Remove cert files if they're in our managed directory
-    if (cert.certPath.startsWith(SSL_CERTS_DIR)) {
-      const certDir = path.dirname(cert.certPath);
-      if (fs.existsSync(certDir)) {
-        fs.rmSync(certDir, { recursive: true, force: true });
+      try {
+        await removeCertificate(id, { force: req.query.force === 'true' });
+        return res.status(200).json({ success: true, data: { deleted: true } });
+      } catch (err) {
+        if (err instanceof CertificateInUseError) {
+          return res.status(409).json({ success: false, error: err.message, data: { sites: err.sites } });
+        }
+        throw err;
       }
     }
 
-    certs.splice(index, 1);
-    writeCerts(certs);
-
-    return res.status(200).json({ success: true, data: { deleted: true } });
+    return res.status(405).json({ success: false, error: 'Método não permitido' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
   }
-
-  return res.status(405).json({ success: false, error: 'Método não permitido' });
 });

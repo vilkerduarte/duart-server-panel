@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { verifyToken, JwtPayload } from '../auth';
+import { verifySession, JwtPayload } from '../auth';
 
 export interface AuthenticatedRequest extends NextApiRequest {
   user?: {
@@ -14,11 +14,46 @@ export type ApiHandler = (
   res: NextApiResponse
 ) => void | Promise<void>;
 
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+export function isSecureRequest(req: NextApiRequest): boolean {
+  const forwarded = req.headers['x-forwarded-proto'];
+  const proto = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  if (proto) return proto.split(',')[0].trim() === 'https';
+  return Boolean((req.socket as { encrypted?: boolean }).encrypted);
+}
+
+/**
+ * Verificação de origem para métodos que alteram estado.
+ *
+ * O cookie usa SameSite=Strict, o que já cobre a maior parte do CSRF, mas o
+ * painel é servido no mesmo host de sites de terceiros hospedados no servidor —
+ * vale a checagem explícita. Requisições sem Origin nem Referer (curl, scripts
+ * com Bearer token) passam: elas não são cross-site por definição.
+ */
+function hasValidOrigin(req: NextApiRequest): boolean {
+  const origin = req.headers.origin;
+  const referer = req.headers.referer;
+  const host = req.headers.host;
+
+  if (!host) return true;
+  if (!origin && !referer) return true;
+
+  const source = origin ?? referer!;
+  try {
+    return new URL(source).host === host;
+  } catch {
+    return false;
+  }
+}
+
 export function authMiddleware(handler: ApiHandler): ApiHandler {
   return async (req: AuthenticatedRequest, res: NextApiResponse) => {
-    // Extract token from cookie or Authorization header
-    let token: string | undefined;
+    if (MUTATING_METHODS.has(req.method ?? '') && !hasValidOrigin(req)) {
+      return res.status(403).json({ success: false, error: 'Origem da requisição não confere' });
+    }
 
+    let token: string | undefined;
     if (req.cookies.token) {
       token = req.cookies.token;
     } else if (req.headers.authorization?.startsWith('Bearer ')) {
@@ -29,12 +64,15 @@ export function authMiddleware(handler: ApiHandler): ApiHandler {
       return res.status(401).json({ success: false, error: 'Não autenticado' });
     }
 
-    const payload: JwtPayload | null = verifyToken(token);
-
-    if (!payload) {
-      return res.status(401).json({ success: false, error: 'Token inválido ou expirado' });
+    const session = verifySession(token);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        error: 'Sessão inválida ou expirada. Faça login novamente.',
+      });
     }
 
+    const payload: JwtPayload = session.payload;
     req.user = {
       id: payload.sub,
       username: payload.username,

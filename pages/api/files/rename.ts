@@ -1,27 +1,31 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
-import path from 'path';
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import { resolveSafePath } from '@/lib/paths';
+import { respondWithError, configuredRoots, methodNotAllowed } from '@/lib/api-helpers';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  if (req.method !== 'PUT') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
-  }
+  if (req.method !== 'PUT') return methodNotAllowed(res);
 
   try {
-    const { oldPath, newPath } = req.body;
-    if (!oldPath || !newPath) return res.status(400).json({ success: false, error: 'Caminhos são obrigatórios' });
+    const { oldPath, newPath } = req.body ?? {};
+    if (!oldPath || !newPath) {
+      return res.status(400).json({ success: false, error: 'Caminhos são obrigatórios' });
+    }
 
-    const resolvedOld = path.resolve('/', oldPath);
-    const resolvedNew = path.resolve('/', newPath);
+    const roots = configuredRoots();
+    // Origem e destino precisam estar na jaula: senão renomear vira uma forma
+    // de mover arquivo para fora dela.
+    const resolvedOld = resolveSafePath(oldPath, { allowedRoots: roots });
+    const resolvedNew = resolveSafePath(newPath, { allowedRoots: roots });
 
-    if (!fs.existsSync(resolvedOld)) {
-      return res.status(404).json({ success: false, error: 'Arquivo/diretório não encontrado' });
+    if (fs.existsSync(resolvedNew)) {
+      return res.status(409).json({ success: false, error: 'O destino já existe' });
     }
 
     fs.renameSync(resolvedOld, resolvedNew);
-    return res.status(200).json({ success: true, data: { renamed: true } });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(200).json({ success: true, data: { renamed: true, path: resolvedNew } });
+  } catch (err) {
+    return respondWithError(res, err);
   }
 });

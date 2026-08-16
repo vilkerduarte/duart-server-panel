@@ -1,33 +1,33 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import type { NextApiResponse } from 'next';
 import fs from 'fs';
-import path from 'path';
+import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
+import { resolveSafePath } from '@/lib/paths';
+import { respondWithError, configuredRoots, methodNotAllowed } from '@/lib/api-helpers';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
-  if (req.method !== 'DELETE') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
-  }
+  if (req.method !== 'DELETE') return methodNotAllowed(res);
 
   try {
-    const { filePath, recursive } = req.body;
+    const { filePath, recursive } = req.body ?? {};
+    if (!filePath) return res.status(400).json({ success: false, error: 'Caminho é obrigatório' });
 
-    if (!filePath) {
-      return res.status(400).json({ success: false, error: 'Caminho é obrigatório' });
+    const resolved = resolveSafePath(filePath, { allowedRoots: configuredRoots() });
+    const stat = fs.lstatSync(resolved);
+
+    if (stat.isDirectory() && !recursive) {
+      const entries = fs.readdirSync(resolved);
+      if (entries.length) {
+        return res.status(409).json({
+          success: false,
+          error: `O diretório não está vazio (${entries.length} itens). Confirme a remoção recursiva.`,
+          data: { requiresRecursive: true, itemCount: entries.length },
+        });
+      }
     }
 
-    const resolvedPath = path.resolve('/', filePath);
-
-    if (!fs.existsSync(resolvedPath)) {
-      return res.status(404).json({ success: false, error: 'Arquivo/diretório não encontrado' });
-    }
-
-    fs.rmSync(resolvedPath, { recursive: !!recursive, force: false });
-
-    return res.status(200).json({
-      success: true,
-      data: { deleted: true },
-    });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    fs.rmSync(resolved, { recursive: Boolean(recursive), force: false });
+    return res.status(200).json({ success: true, data: { deleted: true, path: resolved } });
+  } catch (err) {
+    return respondWithError(res, err);
   }
 });
