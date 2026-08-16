@@ -5,7 +5,7 @@ import { assessCommandRisk, needsRollbackGuard } from '../lib/ai/safety';
 import { validateCronExpression, nextRuns } from '../lib/cron';
 import { unifiedDiff } from '../lib/diff';
 import { buildArgv, COMMAND_WHITELIST } from '../lib/system';
-import { validateConversation, pruneUnansweredCalls } from '../lib/ai/sessions';
+import { validateConversation, pruneUnansweredCalls, sanitizeConversation, trimConversation } from '../lib/ai/sessions';
 import { toolsForMode, requiresApproval, ALL_TOOLS } from '../lib/ai/tools';
 
 /**
@@ -300,5 +300,112 @@ describe('modo laboratório', () => {
     for (const name of names) {
       expect(name, `${name} fora do padrão`).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
     }
+  });
+});
+
+describe('sessão travada por turno vazio', () => {
+  it('remove a mensagem de assistente sem content e sem tool_calls', () => {
+    // Este é o envenenamento: o modelo devolve um turno vazio, ele é gravado, e
+    // toda mensagem seguinte falha com "content or tool_calls must be set".
+    const poisoned = [
+      { role: 'user' as const, content: 'monte o projeto' },
+      { role: 'assistant' as const, content: null },
+      { role: 'user' as const, content: 'oi?' },
+    ];
+    const clean = sanitizeConversation(poisoned);
+    expect(clean).toHaveLength(2);
+    expect(clean.every(m => m.role !== 'assistant' || m.content)).toBe(true);
+    expect(validateConversation(clean).valid).toBe(true);
+  });
+
+  it('trata string vazia como turno vazio', () => {
+    const messages = [
+      { role: 'user' as const, content: 'oi' },
+      { role: 'assistant' as const, content: '   ' },
+    ];
+    expect(sanitizeConversation(messages)).toHaveLength(1);
+  });
+
+  it('preserva o texto quando a chamada ficou sem resposta', () => {
+    const messages = [
+      { role: 'user' as const, content: 'oi' },
+      {
+        role: 'assistant' as const,
+        content: 'Vou verificar o nginx.',
+        tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'nginx_test', arguments: '{}' } }],
+      },
+    ];
+    const clean = sanitizeConversation(messages);
+    expect(clean).toHaveLength(2);
+    expect(clean[1].content).toBe('Vou verificar o nginx.');
+    expect(clean[1].tool_calls).toBeUndefined();
+    expect(validateConversation(clean).valid).toBe(true);
+  });
+
+  it('descarta resposta de ferramenta órfã', () => {
+    const messages = [
+      { role: 'user' as const, content: 'oi' },
+      { role: 'tool' as const, content: '{"ok":true}', tool_call_id: 'fantasma' },
+    ];
+    expect(sanitizeConversation(messages)).toHaveLength(1);
+  });
+
+  it('mantém intacto um grupo válido de chamada e resposta', () => {
+    const messages = [
+      { role: 'user' as const, content: 'oi' },
+      {
+        role: 'assistant' as const,
+        content: null,
+        tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'nginx_test', arguments: '{}' } }],
+      },
+      { role: 'tool' as const, content: '{"ok":true}', tool_call_id: 'c1' },
+      { role: 'assistant' as const, content: 'O nginx está válido.' },
+    ];
+    expect(sanitizeConversation(messages)).toHaveLength(4);
+  });
+
+  it('é idempotente', () => {
+    const messages = [
+      { role: 'user' as const, content: 'oi' },
+      { role: 'assistant' as const, content: null },
+      { role: 'tool' as const, content: '{}', tool_call_id: 'x' },
+    ];
+    const once = sanitizeConversation(messages);
+    expect(sanitizeConversation(once)).toEqual(once);
+  });
+});
+
+describe('corte de histórico por tamanho', () => {
+  const group = (id: string) => ([
+    { role: 'user' as const, content: `tarefa ${id}` },
+    {
+      role: 'assistant' as const,
+      content: null,
+      tool_calls: [{ id, type: 'function' as const, function: { name: 'read_file', arguments: '{}' } }],
+    },
+    { role: 'tool' as const, content: 'x'.repeat(5000), tool_call_id: id },
+  ]);
+
+  it('não parte um grupo de chamada e resposta ao cortar', () => {
+    // O corte antigo era por slice() e separava a chamada da resposta — o que
+    // derruba a requisição inteira com 400.
+    const messages = [...group('a'), ...group('b'), ...group('c'), ...group('d')];
+    const result = trimConversation(messages, 12000);
+
+    expect(result.dropped).toBeGreaterThan(0);
+    expect(validateConversation(result.messages).valid).toBe(true);
+  });
+
+  it('preserva a primeira troca, onde está a tarefa', () => {
+    const messages = [...group('a'), ...group('b'), ...group('c'), ...group('d')];
+    const result = trimConversation(messages, 12000);
+    expect(result.messages[0].content).toBe('tarefa a');
+  });
+
+  it('não corta quando cabe no limite', () => {
+    const messages = group('a');
+    const result = trimConversation(messages, 1_000_000);
+    expect(result.dropped).toBe(0);
+    expect(result.messages).toEqual(messages);
   });
 });

@@ -8,7 +8,8 @@ import {
 } from '@/lib/ai/tools';
 import { appendJournal } from '@/lib/ai/journal';
 import {
-  createSession, loadSession, saveSession, deriveTitle, pruneUnansweredCalls,
+  createSession, loadSession, saveSession, deriveTitle,
+  sanitizeConversation, trimConversation,
   AiSession, ChatMessage, PendingApproval, ApprovalMode, ToolCallRecord,
 } from '@/lib/ai/sessions';
 
@@ -31,6 +32,13 @@ const MAX_ITERATIONS = 12;
 /** Montar um projeto do zero gasta muito mais passos que ajustar um vhost. */
 const MAX_ITERATIONS_LAB = 60;
 const MAX_TOOL_RESULT_CHARS = 12000;
+
+/** Teto do histórico enviado por requisição, deixando folga para prompt e resposta. */
+const MAX_CONTEXT_CHARS = 240_000;
+
+/** Escrever arquivos inteiros numa chamada precisa de bem mais que 4096 tokens. */
+const MAX_TOKENS_DEFAULT = 4096;
+const MAX_TOKENS_LAB = 8192;
 
 type SseEvent =
   | { type: 'session'; sessionId: string; title: string; mode: ApprovalMode }
@@ -186,6 +194,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
 
   // Montar um projeto inteiro leva muito mais passos do que ajustar um vhost.
   const maxIterations = session.mode === 'full' ? MAX_ITERATIONS_LAB : MAX_ITERATIONS;
+  const maxTokens = session.mode === 'full' ? MAX_TOKENS_LAB : MAX_TOKENS_DEFAULT;
 
   send(res, { type: 'session', sessionId: session.id, title: session.title, mode: session.mode });
 
@@ -270,27 +279,45 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
     while (iterations < maxIterations) {
       iterations++;
 
-      // Poda defensiva: um stream interrompido no meio do turno anterior deixa
-      // tool_calls sem resposta, e a API recusa o histórico inteiro por causa disso.
-      const history = pruneUnansweredCalls(session.messages);
+      // Saneia e corta antes de enviar: um turno vazio, uma chamada sem resposta
+      // ou uma resposta órfã derrubam a requisição inteira com erro 400.
+      const trimmed = trimConversation(sanitizeConversation(session.messages), MAX_CONTEXT_CHARS);
+      if (trimmed.dropped > 0) {
+        send(res, {
+          type: 'chunk',
+          content: `\n\n_(${trimmed.dropped} troca(s) antiga(s) saíram do contexto para caber no limite do modelo.)_\n\n`,
+        });
+      }
 
       const stream = await client.chat.completions.create({
         model,
-        messages: [{ role: 'system', content: systemPrompt }, ...history] as any,
+        messages: [{ role: 'system', content: systemPrompt }, ...trimmed.messages] as any,
         tools: tools.length ? toOpenAiTools(tools) : undefined,
         tool_choice: tools.length ? 'auto' : undefined,
         stream: true,
-        max_tokens: 4096,
+        // Escrever arquivos inteiros numa chamada de ferramenta estoura 4096
+        // com facilidade — e o corte no meio produz JSON de argumentos inválido.
+        max_tokens: maxTokens,
         // Operação de servidor não se beneficia de variabilidade.
         temperature: 0.2,
       });
 
       let assistantText = '';
+      let reasoningSeen = false;
+      let finishReason: string | null = null;
       const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
       for await (const chunk of stream) {
-        const delta = chunk.choices?.[0]?.delta as any;
+        const choice = chunk.choices?.[0] as any;
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+
+        const delta = choice?.delta as any;
         if (!delta) continue;
+
+        // Modelos de raciocínio emitem a cadeia de pensamento em campo separado.
+        // Ela não pode voltar para a API no histórico, mas serve para saber que
+        // o modelo respondeu — em vez de tratar o turno como vazio.
+        if (delta.reasoning_content) reasoningSeen = true;
 
         if (delta.content) {
           assistantText += delta.content;
@@ -319,12 +346,61 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           },
         }));
 
+      /* ---------- Turno vazio: não pode ser gravado ---------- */
+
+      // Um assistente sem `content` e sem `tool_calls` é recusado pela API — e
+      // como fica salvo na sessão, envenena toda mensagem seguinte. Antes, o
+      // laço simplesmente encerrava aqui: a tela parava sem erro nenhum e a
+      // conversa ficava inutilizável a partir dali.
+      if (!assistantText.trim() && calls.length === 0) {
+        const motivo = finishReason === 'length'
+          ? 'A resposta foi cortada pelo limite de tokens antes de produzir qualquer conteúdo. ' +
+            'O contexto provavelmente está grande demais — comece uma conversa nova para esta etapa.'
+          : finishReason === 'content_filter'
+            ? 'O provedor filtrou a resposta.'
+            : reasoningSeen
+              ? 'O modelo raciocinou mas não emitiu resposta nem chamada de ferramenta. ' +
+                'Costuma acontecer quando o contexto está no limite.'
+              : `O modelo devolveu um turno vazio (finish_reason: ${finishReason ?? 'desconhecido'}).`;
+
+        appendJournal({
+          sessionId: session.id, user: ctx.user, mode: session.mode,
+          tool: '(turno vazio)', args: { finishReason, reasoningSeen, iterations },
+          outcome: 'error', durationMs: 0, stderr: motivo,
+        });
+
+        // A sessão é salva sem a mensagem inválida: ela continua utilizável.
+        saveSession(session);
+        send(res, { type: 'error', content: `${motivo} Nada foi perdido — a conversa segue utilizável.` });
+        send(res, { type: 'done', sessionId: session.id, title: session.title, iterations });
+        res.end();
+        return;
+      }
+
       const assistantMessage: ChatMessage = {
         role: 'assistant',
         content: assistantText || null,
         ...(calls.length ? { tool_calls: calls } : {}),
       };
       session.messages.push(assistantMessage);
+
+      // Chamada cortada no meio tem JSON de argumentos truncado; executar com
+      // argumentos pela metade é pior do que avisar.
+      if (finishReason === 'length' && calls.length > 0) {
+        for (const call of calls) {
+          session.messages.push({
+            role: 'tool', tool_call_id: call.id, name: call.function.name,
+            content: JSON.stringify({
+              ok: false,
+              error: 'A chamada foi cortada pelo limite de tokens e os argumentos vieram incompletos. '
+                + 'Refaça em pedaços menores (menos arquivos por chamada, ou apply_patch em vez de reescrever).',
+            }),
+          });
+        }
+        saveSession(session);
+        send(res, { type: 'tool_result', name: calls[0].function.name, ok: false, summary: 'cortada por limite de tokens' });
+        continue;
+      }
 
       if (!calls.length) {
         saveSession(session);
@@ -396,21 +472,47 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
     res.end();
   } catch (err: any) {
     const message = err?.message ?? 'Erro na comunicação com a IA';
+    let historyWasInvalid = false;
 
+    // A ordem importa: os padrões específicos vêm antes dos genéricos. A versão
+    // anterior testava /tool|function.?call/ cedo demais e capturava
+    // "content or tool_calls must be set" — um bug de histórico do painel —
+    // reportando-o como "o modelo não suporta function calling". O diagnóstico
+    // errado mandava trocar o modelo em vez de consertar a sessão.
     let friendly = message;
-    if (/401|403|authentication|invalid_api_key/i.test(message)) {
+
+    if (/401|403|authentication|invalid_api_key|no permission/i.test(message)) {
       friendly = 'Chave de API inválida ou sem permissão. Verifique em Configurações.';
-    } else if (/429|rate.?limit/i.test(message)) {
-      friendly = 'Limite de requisições do provedor atingido. Aguarde alguns segundos.';
-    } else if (/timeout|ETIMEDOUT|ECONNRESET/i.test(message)) {
+    } else if (/429|rate.?limit|quota|insufficient.?balance/i.test(message)) {
+      friendly = 'Limite ou saldo do provedor atingido. Verifique a conta e aguarde alguns segundos.';
+    } else if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up/i.test(message)) {
       friendly = 'Timeout na conexão com o provedor de IA. Tente novamente.';
-    } else if (/tool|function.?call/i.test(message)) {
-      friendly = `O modelo configurado (${readConfig().aiModel}) parece não suportar function calling. Escolha um modelo com suporte a ferramentas em Configurações. Detalhe: ${message}`;
+    } else if (/content or tool_calls must be set|invalid assistant message/i.test(message)) {
+      friendly =
+        'O histórico desta conversa continha uma mensagem inválida (turno vazio do modelo). ' +
+        'Ela foi removida automaticamente — envie a mensagem novamente. ' +
+        'Se voltar a acontecer, o contexto está no limite: comece uma conversa nova.';
+      historyWasInvalid = true;
+    } else if (/tool.?call.*not.*support|does not support tools|unsupported.*function.?call/i.test(message)) {
+      friendly =
+        `O modelo configurado (${readConfig().aiModel}) não suporta function calling, ` +
+        'que é o que permite à IA executar ferramentas. Escolha outro modelo em Configurações.';
+    } else if (/maximum context length|context_length_exceeded|too long/i.test(message)) {
+      friendly =
+        'O contexto da conversa excedeu o limite do modelo. As trocas mais antigas foram descartadas — ' +
+        'reenvie a mensagem, ou comece uma conversa nova para a próxima etapa.';
+      historyWasInvalid = true;
+    } else if (/model.*(not found|does not exist)|invalid model/i.test(message)) {
+      friendly =
+        `O provedor não reconhece o modelo "${readConfig().aiModel}". ` +
+        'Confira o identificador em Configurações → Integração IA.';
     }
 
     try {
       if (session) {
         session.pending = null;
+        // Grava já saneada, para o próximo envio não repetir o mesmo erro.
+        if (historyWasInvalid) session.messages = sanitizeConversation(session.messages);
         saveSession(session);
       }
       send(res, { type: 'error', content: friendly });

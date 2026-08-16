@@ -76,6 +76,15 @@ export interface AiSession {
 
 const MAX_MESSAGES = 200;
 
+/**
+ * Teto de caracteres do histórico gravado.
+ *
+ * No modo laboratório o resultado de cada ferramenta chega a 12 mil caracteres
+ * e uma sessão passa de 50 chamadas — o contexto do modelo estoura bem antes de
+ * 200 mensagens, e o sintoma é o modelo devolver um turno vazio em vez de erro.
+ */
+const MAX_HISTORY_CHARS = 300_000;
+
 function sessionPath(id: string): string {
   if (!/^[a-zA-Z0-9-]{6,64}$/.test(id)) throw new Error('ID de sessão inválido');
   return path.join(SESSIONS_DIR, `${id}.json`);
@@ -130,7 +139,9 @@ export function loadSession(id: string): AiSession | null {
     const session = readJson<AiSession | null>(file, null);
     if (!session) return null;
 
-    return { ...session, messages: normalizeMessages(session.messages) };
+    // Saneia na leitura: conversas que já travaram voltam a funcionar sem que
+    // o usuário precise descartá-las.
+    return { ...session, messages: sanitizeConversation(normalizeMessages(session.messages)) };
   } catch {
     return null;
   }
@@ -138,15 +149,14 @@ export function loadSession(id: string): AiSession | null {
 
 export function saveSession(session: AiSession): void {
   ensureDir(SESSIONS_DIR, 0o750);
-  const trimmed: AiSession = {
-    ...session,
-    updatedAt: new Date().toISOString(),
-    // Mantém o início da conversa (onde está a tarefa) e a cauda recente.
-    messages: session.messages.length > MAX_MESSAGES
-      ? [...session.messages.slice(0, 10), ...session.messages.slice(-(MAX_MESSAGES - 10))]
-      : session.messages,
-  };
-  writeJson(sessionPath(session.id), trimmed, 0o640);
+
+  // O corte antigo era por `slice`, que partia grupos ao meio e deixava a
+  // sessão gravada num estado que a API recusa.
+  const messages = session.messages.length > MAX_MESSAGES
+    ? trimConversation(session.messages, MAX_HISTORY_CHARS).messages
+    : session.messages;
+
+  writeJson(sessionPath(session.id), { ...session, updatedAt: new Date().toISOString(), messages }, 0o640);
 }
 
 export function updateSession(id: string, mutate: (session: AiSession) => AiSession): Promise<AiSession> {
@@ -246,17 +256,104 @@ export function validateConversation(messages: ChatMessage[]): { valid: boolean;
 }
 
 /**
- * Remove do fim do histórico as chamadas que ficaram sem resposta.
- * Acontece quando o stream é interrompido no meio de um turno; sem a poda, a
- * sessão fica permanentemente inutilizável.
+ * Deixa o histórico num estado que a API aceita.
+ *
+ * Três defeitos tornam uma sessão permanentemente inutilizável, porque ficam
+ * gravados e são reenviados a cada mensagem seguinte:
+ *
+ * 1. mensagem de assistente sem `content` e sem `tool_calls` — a API responde
+ *    "Invalid assistant message: content or tool_calls must be set". Aparece
+ *    quando o modelo devolve um turno vazio (contexto estourado, corte por
+ *    max_tokens, resposta filtrada);
+ * 2. `tool_call` sem a mensagem `tool` correspondente, deixado por um stream
+ *    interrompido no meio do turno;
+ * 3. mensagem `tool` órfã, cuja mensagem de assistente foi removida — inclusive
+ *    pela poda das outras duas, ou por corte de histórico.
+ *
+ * Rodar isto na leitura da sessão conserta conversas já travadas.
  */
-export function pruneUnansweredCalls(messages: ChatMessage[]): ChatMessage[] {
+export function sanitizeConversation(messages: ChatMessage[]): ChatMessage[] {
+  const kept: ChatMessage[] = [];
   const answered = new Set(
     messages.filter(m => m.role === 'tool' && m.tool_call_id).map(m => m.tool_call_id as string),
   );
 
-  return messages.filter(message => {
-    if (!message.tool_calls?.length) return true;
-    return message.tool_calls.every(call => answered.has(call.id));
-  });
+  // Ids que sobreviveram: só as respostas destes podem ficar.
+  const validCallIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      const hasContent = typeof message.content === 'string' && message.content.trim().length > 0;
+      const calls = message.tool_calls ?? [];
+
+      // Turno vazio: não existe forma válida de reenviá-lo.
+      if (!hasContent && calls.length === 0) continue;
+
+      // Chamadas sem resposta invalidam a mensagem inteira. Se ela também trazia
+      // texto, o texto é preservado sozinho — o raciocínio do modelo continua
+      // útil como contexto mesmo sem a chamada.
+      if (calls.length > 0 && !calls.every(call => answered.has(call.id))) {
+        if (hasContent) kept.push({ role: 'assistant', content: message.content });
+        continue;
+      }
+
+      for (const call of calls) validCallIds.add(call.id);
+      kept.push(message);
+      continue;
+    }
+
+    if (message.role === 'tool') {
+      if (message.tool_call_id && validCallIds.has(message.tool_call_id)) kept.push(message);
+      continue;
+    }
+
+    kept.push(message);
+  }
+
+  return kept;
+}
+
+/** Mantido por compatibilidade; `sanitizeConversation` cobre este caso e mais. */
+export function pruneUnansweredCalls(messages: ChatMessage[]): ChatMessage[] {
+  return sanitizeConversation(messages);
+}
+
+/**
+ * Corta o histórico por tamanho, respeitando os grupos.
+ *
+ * O corte por contagem de mensagens (`slice`) parte grupos ao meio: separa uma
+ * mensagem de assistente das respostas `tool` dela, ou deixa a resposta sem a
+ * chamada — os dois casos derrubam a conversa inteira com erro 400.
+ *
+ * Aqui a unidade de corte é a troca completa (mensagem do usuário e tudo que
+ * veio depois dela até a próxima), e a primeira troca é preservada sempre,
+ * porque é onde está a tarefa.
+ */
+export function trimConversation(messages: ChatMessage[], maxChars: number): {
+  messages: ChatMessage[];
+  dropped: number;
+} {
+  const size = (list: ChatMessage[]) =>
+    list.reduce((total, m) => total + (m.content?.length ?? 0)
+      + (m.tool_calls?.reduce((t, c) => t + c.function.arguments.length + c.function.name.length, 0) ?? 0), 0);
+
+  if (size(messages) <= maxChars) return { messages, dropped: 0 };
+
+  // Agrupa: cada bloco começa numa mensagem do usuário.
+  const groups: ChatMessage[][] = [];
+  for (const message of messages) {
+    if (message.role === 'user' || groups.length === 0) groups.push([message]);
+    else groups[groups.length - 1].push(message);
+  }
+
+  const first = groups[0] ?? [];
+  const rest = groups.slice(1);
+  let dropped = 0;
+
+  while (rest.length > 1 && size([...first, ...rest.flat()]) > maxChars) {
+    rest.shift();
+    dropped++;
+  }
+
+  return { messages: sanitizeConversation([...first, ...rest.flat()]), dropped };
 }
