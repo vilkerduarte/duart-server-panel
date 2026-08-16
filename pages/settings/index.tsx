@@ -17,6 +17,10 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
 
+  const [aiBaseUrl, setAiBaseUrl] = useState('');
+  const [aiModel, setAiModel] = useState('');
+  const [unrestricted, setUnrestricted] = useState(false);
+
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -32,6 +36,9 @@ export default function SettingsPage() {
         setConfig(j.data);
         setServerName(j.data.serverName || '');
         setLanguage(j.data.language || 'pt-BR');
+        setAiBaseUrl(j.data.aiBaseUrl || '');
+        setAiModel(j.data.aiModel || '');
+        setUnrestricted(Boolean(j.data.aiUnrestrictedEnabled));
       }
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);
@@ -41,7 +48,12 @@ export default function SettingsPage() {
     const updates: any = {};
     if (serverName) updates.serverName = serverName;
     if (language) updates.language = language;
+    // A chave só é enviada quando o campo foi preenchido: em branco significa
+    // "manter a atual", não "apagar".
     if (apiKey) updates.aiApiKey = apiKey;
+    updates.aiBaseUrl = aiBaseUrl;
+    if (aiModel) updates.aiModel = aiModel;
+    updates.aiUnrestrictedEnabled = unrestricted;
     await fetch('/api/settings/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -140,6 +152,52 @@ export default function SettingsPage() {
                   platform.deepseek.com
                 </a>
               </p>
+
+              <Input
+                label="Endpoint (deixe vazio para DeepSeek)"
+                placeholder="https://api.openai.com/v1"
+                value={aiBaseUrl}
+                onChange={e => setAiBaseUrl(e.target.value)}
+                className="mt-4"
+              />
+              <Input
+                label="Modelo"
+                placeholder="deepseek-chat"
+                value={aiModel}
+                onChange={e => setAiModel(e.target.value)}
+                className="mt-4"
+              />
+              <p className="text-xs text-[var(--text-muted)] mt-2">
+                O cliente é compatível com a API da OpenAI — qualquer endpoint nesse formato serve.
+                O modelo precisa suportar <span className="font-mono">function calling</span>, senão a IA
+                não consegue executar ferramentas.
+              </p>
+
+              {/* Modo laboratório */}
+              <div className="mt-6 pt-4 border-t border-[var(--border-color)]">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={unrestricted}
+                    onChange={e => setUnrestricted(e.target.checked)}
+                    className="mt-1 rounded"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium text-red-400">Liberar o modo laboratório</span>
+                    <span className="block text-xs text-[var(--text-muted)] mt-1">
+                      Habilita um quarto modo no assistente em que ele executa qualquer comando,
+                      escreve em qualquer caminho e pode alterar o código do próprio painel —
+                      tudo sem pedir aprovação. As proteções que restam são mecânicas: registro de
+                      tudo no journal, snapshot antes de alterar o painel, e reversão automática se
+                      o painel não voltar depois de se reiniciar.
+                    </span>
+                    <span className="block text-xs text-red-400/80 mt-1">
+                      Use apenas em servidor dedicado a testes. Ligado isto, o painel deixa de ter
+                      contenção contra o que a IA decidir fazer.
+                    </span>
+                  </span>
+                </label>
+              </div>
             </Card>
 
             {/* Change Password */}

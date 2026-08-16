@@ -150,7 +150,15 @@ O migrador avisa; remova com `crontab -e`.
 **A IA muda de comportamento.** Ela agora executa ferramentas de verdade. O modo
 padrão é **Assistido**: lê à vontade e pede aprovação, mostrando diff ou comando
 exato, antes de cada alteração. Se preferir começar sem risco nenhum, mude para
-**Leitura** na barra do assistente.
+**Leitura** na barra do assistente. Há também o modo **Laboratório**, desligado
+por padrão — veja o [README](README.md#modo-laboratório).
+
+**Backups de vhost saem de `sites-available`.** Versões anteriores gravavam
+`dominio.bak-<timestamp>` dentro de `/etc/nginx/sites-available/`, e como o
+painel varre esse diretório para listar sites, cada backup aparecia como um
+vhost a mais na tela — uma instalação executada duas vezes mostrava o mesmo
+domínio três vezes. Agora eles vão para `/var/lib/duart-panel/backups/nginx/`,
+e o migrador move os que já existem.
 
 ---
 

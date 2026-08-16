@@ -5,7 +5,7 @@ const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const SETTINGS_DIR = path.join(DATA_DIR, 'settings');
 const CONFIG_FILE = path.join(SETTINGS_DIR, 'config.json');
 
-export type AiApprovalMode = 'read' | 'assisted' | 'autonomous';
+export type AiApprovalMode = 'read' | 'assisted' | 'autonomous' | 'full';
 
 export interface AppConfig {
   serverName: string;
@@ -18,6 +18,13 @@ export interface AppConfig {
   aiProvider: string;
   /** Modo de aprovação inicial de cada nova conversa. */
   aiDefaultMode: AiApprovalMode;
+  /**
+   * Libera o modo laboratório: a IA passa a poder executar qualquer coisa no
+   * servidor, escrever em qualquer caminho e alterar o próprio código do painel,
+   * sem pedir aprovação. Desligado por padrão — ligue apenas em servidor
+   * dedicado a testes, porque nesse modo o painel deixa de ter contenção.
+   */
+  aiUnrestrictedEnabled: boolean;
   theme: 'dark' | 'light';
   port: number;
   domain: string;
@@ -50,6 +57,7 @@ const DEFAULT_CONFIG: AppConfig = {
   aiBaseUrl: '',
   aiProvider: 'deepseek',
   aiDefaultMode: 'assisted',
+  aiUnrestrictedEnabled: false,
   theme: 'dark',
   port: 0,
   domain: '',

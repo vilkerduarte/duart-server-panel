@@ -536,6 +536,9 @@ export function readRawConfig(id: string): string {
 /*  Varredura do disco                                                 */
 /* ------------------------------------------------------------------ */
 
+/** Arquivos em sites-available que não são vhosts: backups, restos de pacote, editores. */
+export const IGNORED_VHOST_FILE = /(^\.|\.(bak|backup|save|old|orig|tmp|swp|disabled)([.\-~].*)?$|\.dpkg-[a-z]+$|\.ucf-[a-z]+$|~$)/i;
+
 export function scanVhosts(): { managed: ManagedSite[]; external: ParsedVhost[] } {
   const managed = readSites();
 
@@ -557,7 +560,10 @@ export function scanVhosts(): { managed: ManagedSite[]; external: ParsedVhost[] 
   } catch {}
 
   for (const fileName of fs.readdirSync(NGINX_AVAILABLE)) {
-    if (fileName === 'default' || /\.(bak|backup|save|orig|dpkg-\w+)$|~$/.test(fileName)) continue;
+    // O sufixo pode vir com timestamp (`.bak-20260816120000`), então a checagem
+    // não pode ancorar no fim do nome — era por isso que backups gerados pelos
+    // scripts apareciam como vhosts duplicados na listagem.
+    if (fileName === 'default' || IGNORED_VHOST_FILE.test(fileName)) continue;
 
     const configPath = path.join(NGINX_AVAILABLE, fileName);
     try {

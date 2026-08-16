@@ -8,6 +8,7 @@ import {
   MAINTENANCE_DIR,
   NginxSiteConfig,
 } from '../lib/nginx';
+import { IGNORED_VHOST_FILE } from '../lib/sites';
 
 /**
  * Testes do gerador de vhost.
@@ -274,5 +275,25 @@ describe('isValidDomain', () => {
     ['', false],
   ])('%s → %s', (domain, expected) => {
     expect(isValidDomain(domain)).toBe(expected);
+  });
+});
+
+describe('IGNORED_VHOST_FILE', () => {
+  it.each([
+    ['exemplo.com', false],
+    ['loja.com.br', false],
+    ['api-v2.exemplo.com', false],
+    // Os scripts geravam `.bak-<timestamp>`; o filtro antigo ancorava em `.bak$`
+    // e deixava passar, então cada execução do instalador criava um vhost
+    // fantasma na listagem do painel.
+    ['exemplo.com.bak-20260816120000', true],
+    ['exemplo.com.bak', true],
+    ['exemplo.com.save', true],
+    ['exemplo.com.disabled', true],
+    ['nginx.conf.dpkg-dist', true],
+    ['app~', true],
+    ['.oculto', true],
+  ])('%s → ignorado: %s', (fileName, expected) => {
+    expect(IGNORED_VHOST_FILE.test(fileName)).toBe(expected);
   });
 });

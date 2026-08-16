@@ -212,6 +212,58 @@ O Duart Panel utiliza o **Next.js como servidor completo** (páginas + API), com
 
 ---
 
+## Modo laboratório
+
+Além dos três modos normais do assistente (Leitura, Assistido, Autônomo), há um
+quarto — **Laboratório** — em que a IA executa qualquer coisa no servidor sem
+pedir aprovação: qualquer comando, escrita em qualquer caminho, instalação de
+qualquer pacote, e alteração do **código do próprio painel**.
+
+Ele vem desligado e só aparece depois de ser habilitado em
+**Configurações → Integração IA → Liberar o modo laboratório**. A ideia é que
+ligá-lo seja uma decisão consciente, não um clique de menu.
+
+**Para que serve:** montar um projeto inteiro numa sessão — criar os arquivos,
+instalar dependências, subir o processo, criar o vhost, emitir o certificado e
+verificar o resultado — sem parar a cada passo. Nesse modo o assistente ganha
+ferramentas próprias:
+
+| Ferramenta | Para quê |
+|---|---|
+| `write_files` | Grava vários arquivos numa chamada só (estrutura de projeto) |
+| `apply_patch` | Aplica diff unificado, em vez de reescrever o arquivo inteiro |
+| `search_code` | Localiza código num projeto antes de editar |
+| `install_packages` | Instala qualquer pacote do apt |
+| `panel_self_update` | Valida e aplica alterações no código do painel |
+| `panel_snapshots` | Lista, cria e restaura snapshots do painel |
+
+**O que continua protegendo, mesmo sem aprovação.** Nada disso é um portão —
+são redes, e existem porque o erro caro aqui é perder o acesso ao servidor:
+
+- toda ação vai para o journal, com argumentos, saída e diff;
+- alterar o painel passa por snapshot → `tsc --noEmit` → `next build` antes de
+  qualquer reinício; se o build falhar, nada reinicia e o painel segue no ar;
+- o reinício é agendado num timer, e um segundo timer confere a saúde do painel
+  25 segundos depois — se ele não responder, o snapshot é restaurado, recompilado
+  e reiniciado sozinho;
+- mudanças em firewall e SSH continuam agendando reversão automática;
+- escrita de vhost continua transacional, revertendo se o `nginx -t` reprovar.
+
+**O que não protege:** `rm -rf` no caminho errado, apagar um banco, formatar um
+disco. Nesse modo o assistente tem o mesmo poder que você tem no terminal como
+root — que é exatamente o ponto. Use em servidor dedicado a testes.
+
+Snapshots do painel ficam em `/var/lib/duart-panel/backups/panel/` (os 10 mais
+recentes). Para reverter à mão:
+
+```bash
+cd /opt/duart-panel
+sudo tar xzf /var/lib/duart-panel/backups/panel/panel-ia-<timestamp>.tar.gz
+sudo npm run build && sudo systemctl restart duart-panel
+```
+
+---
+
 ## Segurança
 
 - JWT em cookie `HttpOnly`, `SameSite=Strict` e `Secure` quando há HTTPS

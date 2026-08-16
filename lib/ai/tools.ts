@@ -31,6 +31,7 @@ import { readCertMetadata, listCertbotLineages, issueCertificate, getCertStatus,
 import { detectPhpVersions, installPhp, diagnosePhpSite, readSlowLog, poolSocketPath, preferredPhpVersion } from '../php';
 import { readApps, appStatus, appLogs, restartApp, reloadApp, detectPythonVersions } from '../python';
 import { assessCommandRisk, needsRollbackGuard, armRollback, disarmRollback } from './safety';
+import { applySelfUpdate, listSnapshots, restoreSnapshot, snapshotPanel, projectRoot } from './selfupdate';
 import type { ApprovalMode } from './sessions';
 
 export type ToolRisk = 'read' | 'write' | 'irreversible';
@@ -47,6 +48,11 @@ export interface ToolContext {
   user: string;
   sessionId: string;
   mode: ApprovalMode;
+  /**
+   * Modo laboratório: sem jaula de caminho, sem aprovação, timeouts longos.
+   * Só é ligado quando o operador habilita explicitamente na configuração.
+   */
+  unrestricted?: boolean;
 }
 
 export interface ToolResult {
@@ -249,9 +255,9 @@ const readTools: ToolDefinition[] = [
       required: ['path'],
       additionalProperties: false,
     },
-    async execute(args) {
+    async execute(args, ctx) {
       try {
-        const target = resolveSafePath(str(args.path), { allowedRoots: allowedRoots() });
+        const target = resolvePath(str(args.path), ctx);
         const entries = fs.readdirSync(target, { withFileTypes: true })
           .filter(e => args.showHidden || !e.name.startsWith('.'))
           .slice(0, 500)
@@ -280,9 +286,9 @@ const readTools: ToolDefinition[] = [
       required: ['path'],
       additionalProperties: false,
     },
-    async execute(args) {
+    async execute(args, ctx) {
       try {
-        const target = resolveSafePath(str(args.path), { allowedRoots: allowedRoots() });
+        const target = resolvePath(str(args.path), ctx);
         const stat = fs.statSync(target);
         if (stat.isDirectory()) return fail('O caminho é um diretório');
         if (stat.size > 5 * 1024 * 1024) return fail('Arquivo maior que 5MB');
@@ -497,7 +503,7 @@ const writeTools: ToolDefinition[] = [
       additionalProperties: false,
     },
     async preview(args) {
-      const target = resolveSafePath(str(args.path), { allowedRoots: allowedRoots() });
+      const target = path.resolve('/', str(args.path));
       const before = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
       const diff = unifiedDiff(before, str(args.content), { fromLabel: target, toLabel: `${target} (novo)` });
 
@@ -507,9 +513,9 @@ const writeTools: ToolDefinition[] = [
         summary: `${fs.existsSync(target) ? 'Alterar' : 'Criar'} ${target} (${describeDiff(diff)})`,
       };
     },
-    async execute(args) {
+    async execute(args, ctx) {
       try {
-        const target = resolveSafePath(str(args.path), { allowedRoots: allowedRoots() });
+        const target = resolvePath(str(args.path), ctx);
         const content = str(args.content);
         const before = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
 
@@ -864,7 +870,8 @@ const writeTools: ToolDefinition[] = [
       properties: {
         command: { type: 'string' },
         reason: { type: 'string', description: 'Por que este comando é necessário' },
-        timeoutSeconds: { type: 'number' },
+        cwd: { type: 'string', description: 'Diretório de trabalho' },
+        timeoutSeconds: { type: 'number', description: 'Padrão 60; até 1800 no modo laboratório' },
       },
       required: ['command', 'reason'],
       additionalProperties: false,
@@ -879,9 +886,13 @@ const writeTools: ToolDefinition[] = [
           : str(args.reason, 'Executar comando'),
       };
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const command = str(args.command);
-      const timeout = Math.min(int(args.timeoutSeconds, 60), 600) * 1000;
+      // Builds e `npm install` de projeto grande estouram 10 minutos com
+      // facilidade; no laboratório o teto sobe para 30.
+      const maxSeconds = ctx?.unrestricted ? 1800 : 600;
+      const timeout = Math.min(int(args.timeoutSeconds, 60), maxSeconds) * 1000;
+      const cwd = args.cwd ? path.resolve('/', str(args.cwd)) : undefined;
 
       let rollbackToken: string | null = null;
       if (needsRollbackGuard(command)) {
@@ -890,14 +901,17 @@ const writeTools: ToolDefinition[] = [
         await armRollback(rollbackToken, ['ufw', '--force', 'enable'], 300);
       }
 
-      const result = await executeRaw(command, timeout);
+      const result = cwd
+        ? await execFileSafe('bash', ['-lc', command], { timeout, cwd })
+        : await executeRaw(command, timeout);
 
       return {
         ok: result.code === 0,
         data: {
           exitCode: result.code,
-          stdout: result.stdout.substring(0, 6000),
-          stderr: result.stderr.substring(0, 2000),
+          cwd: cwd ?? process.cwd(),
+          stdout: result.stdout.substring(0, 8000),
+          stderr: result.stderr.substring(0, 3000),
           rollbackToken,
         },
         error: result.code === 0 ? undefined : `Comando saiu com código ${result.code}`,
@@ -949,7 +963,7 @@ const irreversibleTools: ToolDefinition[] = [
       additionalProperties: false,
     },
     async preview(args) {
-      const target = resolveSafePath(str(args.path), { allowedRoots: allowedRoots() });
+      const target = path.resolve('/', str(args.path));
       let size = 0;
       try { size = fs.statSync(target).size; } catch {}
       return {
@@ -958,12 +972,14 @@ const irreversibleTools: ToolDefinition[] = [
         summary: `Apagar ${target}`,
       };
     },
-    async execute(args) {
+    async execute(args, ctx) {
       try {
-        const target = resolveSafePath(str(args.path), { allowedRoots: allowedRoots() });
+        const target = resolvePath(str(args.path), ctx);
         const stat = fs.statSync(target);
-        if (stat.isDirectory()) return fail('Use run_command para remover diretórios, com confirmação explícita.');
-        fs.rmSync(target, { force: true });
+        if (stat.isDirectory() && !ctx?.unrestricted) {
+          return fail('Use run_command para remover diretórios, com confirmação explícita.');
+        }
+        fs.rmSync(target, { recursive: stat.isDirectory(), force: true });
         return ok({ deleted: target });
       } catch (err) {
         return fail(errorMessage(err));
@@ -1046,17 +1062,332 @@ const irreversibleTools: ToolDefinition[] = [
 ];
 
 /* ------------------------------------------------------------------ */
+/*  Ferramentas de laboratório (modo irrestrito)                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Só entram no catálogo quando o modo laboratório está ligado.
+ *
+ * São as ferramentas que tornam viável construir um projeto inteiro numa
+ * sessão: escrita em lote, aplicação de patch, busca em código e alteração do
+ * próprio painel. Fora do laboratório elas nem são oferecidas ao modelo — não
+ * por serem proibidas, mas porque sem a jaula desligada produziriam apenas
+ * chamadas que falhariam na validação de caminho.
+ */
+const labTools: ToolDefinition[] = [
+  {
+    name: 'write_files',
+    description:
+      'Grava vários arquivos de uma vez, criando os diretórios necessários. ' +
+      'Use para montar a estrutura de um projeto: é uma chamada em vez de uma por arquivo.',
+    risk: 'write',
+    parameters: {
+      type: 'object',
+      properties: {
+        files: {
+          type: 'array',
+          description: 'Arquivos a gravar',
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              content: { type: 'string' },
+              mode: { type: 'string', description: 'Permissão octal, ex.: "755" para executáveis' },
+            },
+            required: ['path', 'content'],
+          },
+        },
+      },
+      required: ['files'],
+      additionalProperties: false,
+    },
+    async preview(args) {
+      const files = Array.isArray(args.files) ? args.files : [];
+      const lines = files.map((file: { path: string; content?: string }) => {
+        const exists = fs.existsSync(path.resolve('/', String(file.path)));
+        const bytes = Buffer.byteLength(String(file.content ?? ''));
+        return `${exists ? 'altera' : ' cria '}  ${file.path}  (${bytes} bytes)`;
+      });
+      return {
+        type: 'text',
+        content: lines.join('\n') || '(nenhum arquivo)',
+        summary: `Gravar ${files.length} arquivo(s)`,
+      };
+    },
+    async execute(args, ctx) {
+      const files = Array.isArray(args.files) ? args.files : [];
+      if (!files.length) return fail('Nenhum arquivo informado');
+
+      const written: string[] = [];
+      const errors: string[] = [];
+
+      for (const file of files) {
+        try {
+          const target = resolvePath(String(file.path), ctx);
+          const content = String(file.content ?? '');
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, content, 'utf-8');
+
+          if (file.mode && /^[0-7]{3,4}$/.test(String(file.mode))) {
+            fs.chmodSync(target, parseInt(String(file.mode), 8));
+          }
+          written.push(target);
+        } catch (err) {
+          errors.push(`${file.path}: ${errorMessage(err)}`);
+        }
+      }
+
+      return {
+        ok: errors.length === 0,
+        data: { written: written.length, files: written, errors },
+        error: errors.length ? errors.join('; ') : undefined,
+      };
+    },
+  },
+
+  {
+    name: 'apply_patch',
+    description:
+      'Aplica um diff unificado a arquivos existentes. Prefira isto a reescrever o arquivo inteiro ' +
+      'quando a mudança é pontual — o diff é menor e não arrisca perder o resto do arquivo.',
+    risk: 'write',
+    parameters: {
+      type: 'object',
+      properties: {
+        patch: { type: 'string', description: 'Diff unificado, no formato de git diff' },
+        cwd: { type: 'string', description: 'Diretório base dos caminhos do diff' },
+        strip: { type: 'number', description: 'Componentes a remover dos caminhos (-p). Padrão 1' },
+      },
+      required: ['patch'],
+      additionalProperties: false,
+    },
+    async preview(args) {
+      return {
+        type: 'diff',
+        content: str(args.patch).slice(0, 20000),
+        summary: `Aplicar patch em ${args.cwd ?? 'diretório do painel'}`,
+      };
+    },
+    async execute(args, ctx) {
+      const patch = str(args.patch);
+      if (!patch.trim()) return fail('Patch vazio');
+
+      const cwd = args.cwd ? resolvePath(str(args.cwd), ctx) : projectRoot();
+      const strip = String(int(args.strip, 1));
+
+      // git apply dá mensagem de erro muito melhor; patch(1) é o plano B para
+      // diretórios que não são repositório git.
+      const viaGit = await execFileSafe(
+        'git', ['apply', '--verbose', `-p${strip}`, '--whitespace=nowarn', '-'],
+        { cwd, timeout: 60000, input: patch },
+      );
+      if (viaGit.code === 0) {
+        return ok({ applied: true, via: 'git apply', output: viaGit.stderr.slice(0, 2000) });
+      }
+
+      const viaPatch = await execFileSafe(
+        'patch', [`-p${strip}`, '--batch', '--forward'],
+        { cwd, timeout: 60000, input: patch },
+      );
+      if (viaPatch.code === 0) {
+        return ok({ applied: true, via: 'patch', output: viaPatch.stdout.slice(0, 2000) });
+      }
+
+      return fail(
+        `O patch não aplicou.\ngit apply: ${viaGit.stderr.slice(0, 1200)}\n` +
+        `patch: ${(viaPatch.stderr || viaPatch.stdout).slice(0, 1200)}\n` +
+        `Releia o arquivo com read_file e refaça o diff a partir do conteúdo atual.`,
+      );
+    },
+  },
+
+  {
+    name: 'search_code',
+    description: 'Busca um padrão nos arquivos de um diretório. Use para se localizar num projeto antes de editar.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Expressão regular estendida' },
+        directory: { type: 'string' },
+        glob: { type: 'string', description: 'Filtro de nome, ex.: "*.ts"' },
+        maxResults: { type: 'number' },
+      },
+      required: ['pattern', 'directory'],
+      additionalProperties: false,
+    },
+    async execute(args, ctx) {
+      const directory = resolvePath(str(args.directory), ctx);
+      const limit = Math.min(int(args.maxResults, 80), 400);
+
+      const grepArgs = [
+        '-rnE', str(args.pattern), directory,
+        '--exclude-dir=node_modules', '--exclude-dir=.git', '--exclude-dir=.next',
+        '--exclude-dir=.venv', '--exclude-dir=__pycache__', '--exclude-dir=vendor',
+        '-I',
+      ];
+      if (args.glob) grepArgs.push(`--include=${str(args.glob)}`);
+
+      const result = await execFileSafe('grep', grepArgs, { timeout: 60000 });
+      const lines = result.stdout.split('\n').filter(Boolean);
+
+      return ok({ matches: lines.slice(0, limit), total: lines.length, truncated: lines.length > limit });
+    },
+  },
+
+  {
+    name: 'install_packages',
+    description:
+      'Instala pacotes do sistema via apt. No modo laboratório qualquer pacote é aceito; ' +
+      'fora dele vale apenas a lista que o painel suporta.',
+    risk: 'write',
+    parameters: {
+      type: 'object',
+      properties: {
+        packages: { type: 'array', items: { type: 'string' } },
+        update: { type: 'boolean', description: 'Rodar apt-get update antes. Padrão true' },
+      },
+      required: ['packages'],
+      additionalProperties: false,
+    },
+    async preview(args) {
+      return {
+        type: 'command',
+        content: `apt-get install -y ${(args.packages ?? []).join(' ')}`,
+        summary: `Instalar ${(args.packages ?? []).length} pacote(s)`,
+      };
+    },
+    async execute(args) {
+      const packages = (Array.isArray(args.packages) ? args.packages : [])
+        .map(String)
+        .filter(name => /^[a-z0-9][a-z0-9+.-]*$/i.test(name));
+
+      if (!packages.length) return fail('Nenhum pacote com nome válido');
+
+      if (args.update !== false) {
+        await execFileSafe('apt-get', ['update', '-qq'], { timeout: 180000 });
+      }
+
+      const result = await execFileSafe(
+        'apt-get', ['install', '-y', '-qq', ...packages],
+        { timeout: 900000, env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' } },
+      );
+
+      return result.code === 0
+        ? ok({ installed: packages })
+        : fail((result.stderr || result.stdout).slice(0, 2000));
+    },
+  },
+
+  {
+    name: 'panel_self_update',
+    description:
+      'Valida alterações que você fez no código do PRÓPRIO Duart Panel e reinicia o serviço. ' +
+      'Faz snapshot antes, roda typecheck e build, e agenda uma reversão automática que restaura ' +
+      'o snapshot caso o painel não volte. Chame DEPOIS de gravar os arquivos. ' +
+      'Se o build falhar, nada reinicia e o painel segue no ar com o código anterior.',
+    risk: 'irreversible',
+    parameters: {
+      type: 'object',
+      properties: {
+        summary: { type: 'string', description: 'O que foi alterado, para o registro' },
+        restart: { type: 'boolean', description: 'Reiniciar após validar. Padrão true' },
+      },
+      required: ['summary'],
+      additionalProperties: false,
+    },
+    async preview(args) {
+      return {
+        type: 'text',
+        content:
+          `Alteração no código do painel: ${args.summary}\n\n` +
+          'Sequência: snapshot → tsc --noEmit → next build → reinício agendado → verificação em 25s.\n' +
+          'Se o painel não responder depois do reinício, o snapshot é restaurado automaticamente.',
+        summary: `Auto-atualizar o painel: ${args.summary}`,
+      };
+    },
+    async execute(args) {
+      const result = await applySelfUpdate({ restart: args.restart !== false, label: 'ia' });
+
+      if (!result.ok) {
+        return { ok: false, error: result.error, rollbackHint: result.snapshot };
+      }
+
+      return {
+        ok: true,
+        data: {
+          snapshot: result.snapshot,
+          validation: result.validation?.output,
+          restartScheduled: result.restartScheduled,
+          aviso: result.restartScheduled
+            ? 'O painel reinicia em alguns segundos. A conversa fica salva; recarregue a página se ela parar de responder.'
+            : 'Build validado; reinício não solicitado.',
+        },
+        rollbackHint: `panel_snapshots action=restore file=${result.snapshot}`,
+      };
+    },
+  },
+
+  {
+    name: 'panel_snapshots',
+    description: 'Lista, cria ou restaura snapshots do código do painel.',
+    risk: 'write',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'create', 'restore'] },
+        file: { type: 'string', description: 'Caminho do snapshot, para action=restore' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async preview(args) {
+      return {
+        type: 'text',
+        content: args.action === 'restore'
+          ? `Restaurar o código do painel a partir de ${args.file} e recompilar.`
+          : `Ação "${args.action}" sobre os snapshots do painel.`,
+        summary: `Snapshots do painel: ${args.action}`,
+      };
+    },
+    async execute(args) {
+      if (args.action === 'list') {
+        return ok({ snapshots: listSnapshots() });
+      }
+      if (args.action === 'create') {
+        const result = await snapshotPanel('manual');
+        return result.ok ? ok({ snapshot: result.file }) : fail(result.error ?? 'falhou');
+      }
+      if (args.action === 'restore') {
+        const file = str(args.file);
+        if (!file) return fail('Informe o snapshot a restaurar');
+
+        const restored = await restoreSnapshot(file);
+        if (!restored.ok) return fail(restored.error ?? 'falhou');
+
+        const update = await applySelfUpdate({ restart: true, label: 'restore' });
+        return update.ok
+          ? ok({ restored: file, restartScheduled: update.restartScheduled })
+          : fail(update.error ?? 'Restaurado, mas o build falhou');
+      }
+      return fail(`Ação desconhecida: ${args.action}`);
+    },
+  },
+];
+
+/* ------------------------------------------------------------------ */
 /*  Registro                                                           */
 /* ------------------------------------------------------------------ */
 
-export const ALL_TOOLS: ToolDefinition[] = [...readTools, ...writeTools, ...irreversibleTools];
+export const ALL_TOOLS: ToolDefinition[] = [...readTools, ...writeTools, ...irreversibleTools, ...labTools];
 
 export const TOOL_MAP = new Map(ALL_TOOLS.map(t => [t.name, t]));
 
 /** Ferramentas expostas ao modelo em cada modo de aprovação. */
 export function toolsForMode(mode: ApprovalMode): ToolDefinition[] {
   if (mode === 'read') return readTools;
-  return ALL_TOOLS;
+  if (mode === 'full') return ALL_TOOLS;
+  return [...readTools, ...writeTools, ...irreversibleTools];
 }
 
 /** Formato de function calling da API OpenAI, que o DeepSeek também aceita. */
@@ -1081,6 +1412,12 @@ export function toOpenAiTools(tools: ToolDefinition[]) {
 export function requiresApproval(tool: ToolDefinition, args: ToolArgs, mode: ApprovalMode): boolean {
   if (tool.risk === 'read') return false;
   if (mode === 'read') return true;
+
+  // Laboratório não tem portão nenhum — é o propósito declarado do modo. O que
+  // resta é proteção mecânica: journal de tudo, snapshot antes de mexer no
+  // painel, rollback do nginx, reversão agendada de firewall e SSH.
+  if (mode === 'full') return false;
+
   if (tool.risk === 'irreversible') return true;
 
   if (tool.name === 'run_command' && assessCommandRisk(str(args.command)).irreversible) {
@@ -1108,6 +1445,20 @@ export async function buildPreview(tool: ToolDefinition, args: ToolArgs): Promis
 /* ------------------------------------------------------------------ */
 /*  Utilitários                                                        */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Resolve caminho respeitando (ou não) a jaula.
+ * No modo laboratório a jaula sai do caminho: o objetivo declarado é montar
+ * projetos e editar o próprio painel, o que exige escrever em qualquer lugar.
+ */
+function resolvePath(input: string, ctx?: ToolContext): string {
+  if (ctx?.unrestricted) {
+    const resolved = path.resolve('/', input);
+    if (!resolved || resolved.includes('\0')) throw new Error('Caminho inválido');
+    return resolved;
+  }
+  return resolveSafePath(input, { allowedRoots: allowedRoots() });
+}
 
 function allowedRoots(): string[] | undefined {
   const config = readConfig() as { fileManagerRoots?: string[] };

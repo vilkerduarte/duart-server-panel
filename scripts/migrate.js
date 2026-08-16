@@ -363,6 +363,22 @@ function checkLeftovers() {
     // PM2 ausente é o caso normal daqui pra frente.
   }
 
+  // Backups que versões anteriores deixavam dentro de sites-available. O painel
+  // varre esse diretório, então cada um aparecia como se fosse outro vhost.
+  try {
+    const strays = fs.readdirSync(NGINX_AVAILABLE).filter(f => /\.bak(-|$)/.test(f));
+    if (strays.length) {
+      change(`move ${strays.length} backup(s) de sites-available para ${DATA_DIR}/backups/nginx (apareciam como vhosts duplicados)`);
+      if (APPLY) {
+        const dest = path.join(DATA_DIR, 'backups', 'nginx');
+        fs.mkdirSync(dest, { recursive: true });
+        for (const file of strays) {
+          fs.renameSync(path.join(NGINX_AVAILABLE, file), path.join(dest, file));
+        }
+      }
+    }
+  } catch {}
+
   // ecosystem.config.js do painel deixa de ser usado.
   const eco = path.join(path.dirname(__dirname), 'ecosystem.config.js');
   if (fs.existsSync(eco)) {

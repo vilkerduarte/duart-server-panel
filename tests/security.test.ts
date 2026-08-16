@@ -5,6 +5,8 @@ import { assessCommandRisk, needsRollbackGuard } from '../lib/ai/safety';
 import { validateCronExpression, nextRuns } from '../lib/cron';
 import { unifiedDiff } from '../lib/diff';
 import { buildArgv, COMMAND_WHITELIST } from '../lib/system';
+import { validateConversation, pruneUnansweredCalls } from '../lib/ai/sessions';
+import { toolsForMode, requiresApproval, ALL_TOOLS } from '../lib/ai/tools';
 
 /**
  * Testes das barreiras de segurança e das funções de validação.
@@ -194,5 +196,109 @@ describe('diff unificado', () => {
   it('emite cabeçalho de hunk', () => {
     const diff = unifiedDiff('a\n', 'b\n');
     expect(diff.text).toMatch(/@@ -\d+,\d+ \+\d+,\d+ @@/);
+  });
+});
+
+describe('histórico enviado ao provedor', () => {
+  it('exige o envelope type:function nos tool_calls', () => {
+    // O formato achatado ({id, name, arguments}) é recusado pela API com
+    // "field type missing" — e o erro não diz qual mensagem está errada.
+    const flat = [
+      { role: 'assistant' as const, content: null,
+        tool_calls: [{ id: 'c1', name: 'x', arguments: '{}' } as never] },
+      { role: 'tool' as const, content: '{}', tool_call_id: 'c1' },
+    ];
+    const result = validateConversation(flat);
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(' ')).toMatch(/type:'function'/);
+  });
+
+  it('aceita o formato correto', () => {
+    const wire = [
+      { role: 'assistant' as const, content: null,
+        tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'x', arguments: '{}' } }] },
+      { role: 'tool' as const, content: '{"ok":true}', tool_call_id: 'c1' },
+    ];
+    expect(validateConversation(wire).valid).toBe(true);
+  });
+
+  it('detecta tool_call sem resposta', () => {
+    const orphan = [
+      { role: 'assistant' as const, content: null,
+        tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'x', arguments: '{}' } }] },
+    ];
+    expect(validateConversation(orphan).valid).toBe(false);
+    expect(validateConversation(orphan).errors.join(' ')).toMatch(/sem resposta/);
+  });
+
+  it('poda chamadas órfãs deixadas por stream interrompido', () => {
+    const messages = [
+      { role: 'user' as const, content: 'oi' },
+      { role: 'assistant' as const, content: null,
+        tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'x', arguments: '{}' } }] },
+    ];
+    const pruned = pruneUnansweredCalls(messages);
+    expect(pruned).toHaveLength(1);
+    expect(validateConversation(pruned).valid).toBe(true);
+  });
+});
+
+describe('modo laboratório', () => {
+  const labToolNames = ['write_files', 'apply_patch', 'search_code', 'install_packages', 'panel_self_update', 'panel_snapshots'];
+
+  it('expõe as ferramentas de laboratório apenas no modo full', () => {
+    const full = toolsForMode('full').map(t => t.name);
+    const autonomous = toolsForMode('autonomous').map(t => t.name);
+    const assisted = toolsForMode('assisted').map(t => t.name);
+
+    for (const name of labToolNames) {
+      expect(full, `full deveria ter ${name}`).toContain(name);
+      expect(autonomous, `autonomous não deveria ter ${name}`).not.toContain(name);
+      expect(assisted, `assisted não deveria ter ${name}`).not.toContain(name);
+    }
+  });
+
+  it('modo leitura não expõe nenhuma ferramenta de escrita', () => {
+    for (const tool of toolsForMode('read')) {
+      expect(tool.risk, `${tool.name} não é somente-leitura`).toBe('read');
+    }
+  });
+
+  it('não pede aprovação para nada no modo laboratório', () => {
+    for (const tool of toolsForMode('full')) {
+      expect(requiresApproval(tool, { command: 'rm -rf /tmp/x' }, 'full')).toBe(false);
+    }
+  });
+
+  it('mantém os portões nos demais modos', () => {
+    const irreversible = ALL_TOOLS.find(t => t.risk === 'irreversible')!;
+    const write = ALL_TOOLS.find(t => t.risk === 'write')!;
+
+    expect(requiresApproval(irreversible, {}, 'autonomous')).toBe(true);
+    expect(requiresApproval(write, {}, 'autonomous')).toBe(false);
+    expect(requiresApproval(write, {}, 'assisted')).toBe(true);
+    expect(requiresApproval(write, {}, 'read')).toBe(true);
+  });
+
+  it('toda ferramenta declara um schema de parâmetros válido', () => {
+    // Um `parameters` malformado é recusado pelo provedor com um erro que não
+    // diz qual ferramenta está errada.
+    for (const tool of ALL_TOOLS) {
+      const params = tool.parameters as { type?: string; properties?: Record<string, { type?: string; enum?: unknown }> };
+      expect(params.type, `${tool.name}`).toBe('object');
+      expect(params.properties, `${tool.name}`).toBeDefined();
+
+      for (const [prop, schema] of Object.entries(params.properties ?? {})) {
+        expect(schema.type, `${tool.name}.${prop} sem type`).toBeDefined();
+      }
+    }
+  });
+
+  it('nomes de ferramenta são únicos e no formato aceito pela API', () => {
+    const names = ALL_TOOLS.map(t => t.name);
+    expect(new Set(names).size).toBe(names.length);
+    for (const name of names) {
+      expect(name, `${name} fora do padrão`).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+    }
   });
 });

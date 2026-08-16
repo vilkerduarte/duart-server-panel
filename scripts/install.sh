@@ -243,6 +243,10 @@ WorkingDirectory=${PROJECT_DIR}
 Environment=NODE_ENV=production
 Environment=PORT=${PORT}
 Environment=DATA_DIR=${DATA_HOME}
+# Usado pela auto-atualização da IA para localizar a raiz do projeto: em
+# produção o código roda a partir de um chunk em .next/server, onde __dirname
+# não corresponde à raiz.
+Environment=PANEL_ROOT=${PROJECT_DIR}
 ExecStart=${NODE_BIN} ${PROJECT_DIR}/node_modules/.bin/next start -p ${PORT}
 Restart=always
 RestartSec=3
@@ -384,14 +388,31 @@ log_ok "Snippets instalados"
 # do certificado existia, concluía "SSL já configurado" e imprimia https:// no
 # resumo — deixando o painel em HTTP e dizendo o contrário.
 
-NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
+NGINX_AVAILABLE_DIR="/etc/nginx/sites-available"
+NGINX_CONF="$NGINX_AVAILABLE_DIR/$DOMAIN"
 HAS_SSL_BLOCK=false
 if [[ -f "$NGINX_CONF" ]] && grep -q "ssl_certificate" "$NGINX_CONF"; then
     HAS_SSL_BLOCK=true
 fi
 
+# Backups NUNCA ficam em sites-available: o painel varre esse diretório para
+# listar vhosts, e um `dominio.bak-20260816…` aparece como se fosse outro site.
+NGINX_BACKUP_DIR="$DATA_HOME/backups/nginx"
+mkdir -p "$NGINX_BACKUP_DIR"
+
 if [[ -f "$NGINX_CONF" ]]; then
-    cp -a "$NGINX_CONF" "${NGINX_CONF}.bak-$(date +%Y%m%d%H%M%S)"
+    cp -a "$NGINX_CONF" "$NGINX_BACKUP_DIR/$(basename "$NGINX_CONF").$(date +%Y%m%d%H%M%S)"
+fi
+
+# Limpa backups que versões anteriores deixaram dentro de sites-available.
+STRAY_COUNT=0
+for stray in "$NGINX_AVAILABLE_DIR"/*.bak-* "$NGINX_AVAILABLE_DIR"/*.bak; do
+    [[ -e "$stray" ]] || continue
+    mv "$stray" "$NGINX_BACKUP_DIR/$(basename "$stray")"
+    STRAY_COUNT=$((STRAY_COUNT + 1))
+done
+if [[ $STRAY_COUNT -gt 0 ]]; then
+    log_ok "$STRAY_COUNT backup(s) movido(s) de sites-available para $NGINX_BACKUP_DIR"
 fi
 
 # IPv6 só entra se a máquina tiver a stack ativa; senão o nginx recusa a config.
@@ -447,7 +468,7 @@ if NGINX_TEST_OUTPUT="$(nginx -t 2>&1)"; then
 else
     log_error "Configuração NGINX inválida:"
     echo "$NGINX_TEST_OUTPUT" >&2
-    LATEST_BAK="$(ls -t "${NGINX_CONF}.bak-"* 2>/dev/null | head -1 || true)"
+    LATEST_BAK="$(ls -t "$NGINX_BACKUP_DIR/$(basename "$NGINX_CONF")."* 2>/dev/null | head -1 || true)"
     if [[ -n "$LATEST_BAK" ]]; then
         cp -a "$LATEST_BAK" "$NGINX_CONF"
         nginx -t && systemctl reload nginx

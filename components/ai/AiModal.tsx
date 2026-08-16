@@ -2,11 +2,11 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   HiOutlinePaperAirplane, HiOutlineXMark, HiOutlinePlus, HiOutlineEye,
   HiOutlineShieldCheck, HiOutlineBolt, HiOutlineWrenchScrewdriver,
-  HiOutlineCheck, HiOutlineExclamationTriangle, HiOutlineClock,
+  HiOutlineCheck, HiOutlineExclamationTriangle, HiOutlineClock, HiOutlineBeaker,
 } from 'react-icons/hi2';
 import Spinner from '@/components/ui/Spinner';
 
-type Mode = 'read' | 'assisted' | 'autonomous';
+type Mode = 'read' | 'assisted' | 'autonomous' | 'full';
 
 interface PendingApproval {
   toolCallId: string;
@@ -69,6 +69,12 @@ const MODES: Array<{ value: Mode; label: string; hint: string; icon: typeof HiOu
     hint: 'Executa a tarefa inteira. Só para no que é irreversível.',
     icon: HiOutlineBolt,
   },
+  {
+    value: 'full',
+    label: 'Laboratório',
+    hint: 'Execução irrestrita: qualquer comando, qualquer caminho, inclusive o código do painel. Sem aprovação.',
+    icon: HiOutlineBeaker,
+  },
 ];
 
 interface AiModalProps {
@@ -84,6 +90,8 @@ export default function AiModal({ open, onClose }: AiModalProps) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [showSessions, setShowSessions] = useState(false);
+  /** O modo laboratório só aparece disponível se estiver liberado na configuração. */
+  const [labEnabled, setLabEnabled] = useState(false);
 
   const chatRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -100,7 +108,14 @@ export default function AiModal({ open, onClose }: AiModalProps) {
     } catch {}
   }, []);
 
-  useEffect(() => { if (open) loadSessions(); }, [open, loadSessions]);
+  useEffect(() => {
+    if (!open) return;
+    loadSessions();
+    fetch('/api/settings/config')
+      .then(res => res.json())
+      .then(json => setLabEnabled(Boolean(json?.data?.aiUnrestrictedEnabled)))
+      .catch(() => setLabEnabled(false));
+  }, [open, loadSessions]);
 
   /**
    * Consome o stream de eventos do servidor.
@@ -279,15 +294,24 @@ export default function AiModal({ open, onClose }: AiModalProps) {
           <div className="flex items-center gap-1 ml-2 p-0.5 rounded-lg bg-[var(--bg-hover)]">
             {MODES.map(m => {
               const Icon = m.icon;
+              const isLab = m.value === 'full';
+              const disabled = isLab && !labEnabled;
+              const active = mode === m.value;
+
               return (
                 <button
                   key={m.value}
-                  onClick={() => setMode(m.value)}
-                  title={m.hint}
+                  onClick={() => !disabled && setMode(m.value)}
+                  disabled={disabled}
+                  title={disabled ? 'Ative o modo laboratório em Configurações → IA' : m.hint}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                    mode === m.value
-                      ? 'bg-blue-600 text-white'
-                      : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                    active
+                      // O laboratório usa vermelho de propósito: é o único modo
+                      // em que nada pede confirmação.
+                      ? (isLab ? 'bg-red-600 text-white' : 'bg-blue-600 text-white')
+                      : disabled
+                        ? 'text-[var(--text-muted)] opacity-40 cursor-not-allowed'
+                        : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                   }`}
                 >
                   <Icon className="w-3.5 h-3.5" />
@@ -321,7 +345,10 @@ export default function AiModal({ open, onClose }: AiModalProps) {
           </div>
         </div>
 
-        <p className="px-5 py-1.5 text-xs text-[var(--text-muted)] border-b border-[var(--border-color)]">
+        <p className={`px-5 py-1.5 text-xs border-b border-[var(--border-color)] ${
+          mode === 'full' ? 'text-red-400 bg-red-600/5' : 'text-[var(--text-muted)]'
+        }`}>
+          {mode === 'full' && <strong>Sem confirmação. </strong>}
           {activeMode.hint}
         </p>
 

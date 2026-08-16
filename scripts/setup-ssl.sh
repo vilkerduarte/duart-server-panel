@@ -160,7 +160,11 @@ VALID_UNTIL="$(openssl x509 -in "$CERT_PATH" -noout -enddate | cut -d= -f2)"
 log_ok "Certificado válido até: $VALID_UNTIL"
 
 # --- vhost com TLS ---
-[[ -f "$NGINX_CONF" ]] && cp -a "$NGINX_CONF" "${NGINX_CONF}.bak-$(date +%Y%m%d%H%M%S)"
+# Fora de sites-available: o painel lista esse diretório e um backup ali vira
+# um vhost fantasma na tela.
+NGINX_BACKUP_DIR="$DATA_DIR/backups/nginx"
+mkdir -p "$NGINX_BACKUP_DIR"
+[[ -f "$NGINX_CONF" ]] && cp -a "$NGINX_CONF" "$NGINX_BACKUP_DIR/$(basename "$NGINX_CONF").$(date +%Y%m%d%H%M%S)"
 
 LISTEN6_80=""
 LISTEN6_443=""
@@ -230,7 +234,7 @@ else
     log_error "Configuração inválida:"
     echo "$NGINX_OUTPUT" >&2
 
-    LATEST_BAK="$(ls -t "${NGINX_CONF}.bak-"* 2>/dev/null | head -1 || true)"
+    LATEST_BAK="$(ls -t "$NGINX_BACKUP_DIR/$(basename "$NGINX_CONF")."* 2>/dev/null | head -1 || true)"
     if [[ -n "$LATEST_BAK" ]]; then
         cp -a "$LATEST_BAK" "$NGINX_CONF"
         if nginx -t >/dev/null 2>&1; then

@@ -8,7 +8,7 @@ import {
 } from '@/lib/ai/tools';
 import { appendJournal } from '@/lib/ai/journal';
 import {
-  createSession, loadSession, saveSession, deriveTitle,
+  createSession, loadSession, saveSession, deriveTitle, pruneUnansweredCalls,
   AiSession, ChatMessage, PendingApproval, ApprovalMode, ToolCallRecord,
 } from '@/lib/ai/sessions';
 
@@ -28,6 +28,8 @@ import {
  */
 
 const MAX_ITERATIONS = 12;
+/** Montar um projeto do zero gasta muito mais passos que ajustar um vhost. */
+const MAX_ITERATIONS_LAB = 60;
 const MAX_TOOL_RESULT_CHARS = 12000;
 
 type SseEvent =
@@ -137,8 +139,23 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       model: appConfig.aiModel,
     });
   }
-  if (requestedMode && ['read', 'assisted', 'autonomous'].includes(requestedMode)) {
+  if (requestedMode && ['read', 'assisted', 'autonomous', 'full'].includes(requestedMode)) {
+    // O modo laboratório precisa de liberação explícita na configuração: sem ela
+    // a sessão cai para assistido em vez de falhar silenciosamente em cada ação.
+    if (requestedMode === 'full' && !appConfig.aiUnrestrictedEnabled) {
+      return res.status(403).json({
+        success: false,
+        error: 'O modo laboratório está desligado. Ative-o em Configurações → IA antes de usá-lo.',
+        code: 'UNRESTRICTED_DISABLED',
+      });
+    }
     session.mode = requestedMode;
+  }
+
+  // Uma sessão salva em modo laboratório não pode reabrir irrestrita depois de
+  // a configuração ser desligada.
+  if (session.mode === 'full' && !appConfig.aiUnrestrictedEnabled) {
+    session.mode = 'assisted';
   }
 
   const userMessage = typeof message === 'string' ? message.trim() : '';
@@ -164,7 +181,11 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
     user: req.user?.username ?? 'desconhecido',
     sessionId: session.id,
     mode: session.mode,
+    unrestricted: session.mode === 'full',
   };
+
+  // Montar um projeto inteiro leva muito mais passos do que ajustar um vhost.
+  const maxIterations = session.mode === 'full' ? MAX_ITERATIONS_LAB : MAX_ITERATIONS;
 
   send(res, { type: 'session', sessionId: session.id, title: session.title, mode: session.mode });
 
@@ -187,13 +208,22 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         (Array.isArray(approvals) ? approvals : []).map((a: any) => [String(a.toolCallId), Boolean(a.approved)]),
       );
 
+      // A API recusa a conversa inteira se um tool_call ficar sem a mensagem
+      // `tool` correspondente. Então, se faltar decisão para alguma chamada,
+      // nada é executado e a pendência é reemitida — em vez de seguir com o
+      // histórico inválido.
+      const undecided = session.pending.filter(p => !decisions.has(p.toolCallId));
+      if (undecided.length) {
+        session.pending = undecided;
+        saveSession(session);
+        send(res, { type: 'approval_required', pending: undecided });
+        send(res, { type: 'done', sessionId: session.id, title: session.title, iterations: 0 });
+        res.end();
+        return;
+      }
+
       for (const pending of session.pending) {
         const approved = decisions.get(pending.toolCallId);
-
-        if (approved === undefined) {
-          // Sem decisão para esta chamada: mantém o restante pendente.
-          continue;
-        }
 
         if (!approved) {
           appendJournal({
@@ -237,12 +267,16 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
 
     let iterations = 0;
 
-    while (iterations < MAX_ITERATIONS) {
+    while (iterations < maxIterations) {
       iterations++;
+
+      // Poda defensiva: um stream interrompido no meio do turno anterior deixa
+      // tool_calls sem resposta, e a API recusa o histórico inteiro por causa disso.
+      const history = pruneUnansweredCalls(session.messages);
 
       const stream = await client.chat.completions.create({
         model,
-        messages: [{ role: 'system', content: systemPrompt }, ...session.messages] as any,
+        messages: [{ role: 'system', content: systemPrompt }, ...history] as any,
         tools: tools.length ? toOpenAiTools(tools) : undefined,
         tool_choice: tools.length ? 'auto' : undefined,
         stream: true,
@@ -277,8 +311,12 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         .filter(c => c.name)
         .map(c => ({
           id: c.id || `call_${Math.random().toString(36).slice(2, 12)}`,
-          name: c.name,
-          arguments: c.arguments || '{}',
+          type: 'function' as const,
+          function: {
+            name: c.name,
+            // Argumento vazio precisa virar objeto vazio válido, não string vazia.
+            arguments: c.arguments || '{}',
+          },
         }));
 
       const assistantMessage: ChatMessage = {
@@ -298,13 +336,14 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       const pending: PendingApproval[] = [];
 
       for (const call of calls) {
-        const tool = TOOL_MAP.get(call.name);
-        const args = parseArgs(call.arguments);
+        const toolName = call.function.name;
+        const tool = TOOL_MAP.get(toolName);
+        const args = parseArgs(call.function.arguments);
 
         if (!tool) {
           session.messages.push({
-            role: 'tool', tool_call_id: call.id, name: call.name,
-            content: JSON.stringify({ ok: false, error: `Ferramenta desconhecida: ${call.name}` }),
+            role: 'tool', tool_call_id: call.id, name: toolName,
+            content: JSON.stringify({ ok: false, error: `Ferramenta desconhecida: ${toolName}` }),
           });
           continue;
         }
@@ -346,10 +385,10 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       saveSession(session);
     }
 
-    if (iterations >= MAX_ITERATIONS) {
+    if (iterations >= maxIterations) {
       send(res, {
         type: 'chunk',
-        content: `\n\n_Limite de ${MAX_ITERATIONS} passos atingido. Peça para continuar se a tarefa não terminou._`,
+        content: `\n\n_Limite de ${maxIterations} passos atingido. Peça para continuar se a tarefa não terminou._`,
       });
     }
 
