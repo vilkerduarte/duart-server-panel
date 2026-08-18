@@ -19,6 +19,7 @@ export default function SettingsPage() {
 
   const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [aiModel, setAiModel] = useState('');
+  const [aiMaxTokens, setAiMaxTokens] = useState('');
   const [unrestricted, setUnrestricted] = useState(false);
 
   // Password change state
@@ -38,6 +39,8 @@ export default function SettingsPage() {
         setLanguage(j.data.language || 'pt-BR');
         setAiBaseUrl(j.data.aiBaseUrl || '');
         setAiModel(j.data.aiModel || '');
+        // Zero significa "usar o padrão do painel": mostra o campo vazio.
+        setAiMaxTokens(j.data.aiMaxTokens ? String(j.data.aiMaxTokens) : '');
         setUnrestricted(Boolean(j.data.aiUnrestrictedEnabled));
       }
     }).catch(() => {}).finally(() => setLoading(false));
@@ -53,6 +56,7 @@ export default function SettingsPage() {
     if (apiKey) updates.aiApiKey = apiKey;
     updates.aiBaseUrl = aiBaseUrl;
     if (aiModel) updates.aiModel = aiModel;
+    updates.aiMaxTokens = aiMaxTokens.trim() === '' ? 0 : Number(aiMaxTokens);
     updates.aiUnrestrictedEnabled = unrestricted;
     await fetch('/api/settings/config', {
       method: 'PUT',
@@ -167,6 +171,22 @@ export default function SettingsPage() {
                 onChange={e => setAiModel(e.target.value)}
                 className="mt-4"
               />
+              <Input
+                label="Máximo de tokens por resposta (vazio usa o padrão)"
+                type="number"
+                min={256}
+                max={65536}
+                placeholder="4096"
+                value={aiMaxTokens}
+                onChange={e => setAiMaxTokens(e.target.value)}
+                className="mt-4"
+              />
+              <p className="text-xs text-[var(--text-muted)] mt-2">
+                Teto da resposta do modelo em cada chamada. Vazio mantém o padrão do painel
+                (4096, ou 8192 no modo laboratório). Valores muito baixos cortam a escrita de
+                arquivos no meio; muito altos podem ser recusados pelo modelo.
+              </p>
+
               <p className="text-xs text-[var(--text-muted)] mt-2">
                 O cliente é compatível com a API da OpenAI — qualquer endpoint nesse formato serve.
                 O modelo precisa suportar <span className="font-mono">function calling</span>, senão a IA

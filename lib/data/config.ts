@@ -19,6 +19,11 @@ export interface AppConfig {
   /** Modo de aprovação inicial de cada nova conversa. */
   aiDefaultMode: AiApprovalMode;
   /**
+   * Teto de tokens da resposta do modelo por chamada. Zero mantém o padrão do
+   * painel (mais alto no modo laboratório, onde a IA escreve arquivos inteiros).
+   */
+  aiMaxTokens: number;
+  /**
    * Libera o modo laboratório: a IA passa a poder executar qualquer coisa no
    * servidor, escrever em qualquer caminho e alterar o próprio código do painel,
    * sem pedir aprovação. Desligado por padrão — ligue apenas em servidor
@@ -57,6 +62,7 @@ const DEFAULT_CONFIG: AppConfig = {
   aiBaseUrl: '',
   aiProvider: 'deepseek',
   aiDefaultMode: 'assisted',
+  aiMaxTokens: 0,
   aiUnrestrictedEnabled: false,
   theme: 'dark',
   port: 0,
@@ -76,6 +82,10 @@ const DEFAULT_CONFIG: AppConfig = {
     certbot: false,
   },
 };
+
+/** Limites aceitos para `aiMaxTokens`; fora disso o valor é ajustado. */
+export const MIN_AI_MAX_TOKENS = 256;
+export const MAX_AI_MAX_TOKENS = 65536;
 
 /** Campos que a UI nunca deve conseguir sobrescrever por PUT genérico. */
 const PROTECTED_FIELDS: Array<keyof AppConfig> = ['installedAt', 'port'];
@@ -98,6 +108,17 @@ export function writeConfig(updates: Partial<AppConfig>): AppConfig {
   for (const field of PROTECTED_FIELDS) {
     if (current[field] !== undefined && current[field] !== '' && current[field] !== 0) {
       delete sanitized[field];
+    }
+  }
+
+  // O campo chega como string do formulário, e um valor absurdo faz a API
+  // recusar a chamada inteira — então normaliza aqui, não na borda.
+  if (sanitized.aiMaxTokens !== undefined) {
+    const parsed = Number(sanitized.aiMaxTokens);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      sanitized.aiMaxTokens = 0;
+    } else {
+      sanitized.aiMaxTokens = Math.min(Math.max(Math.trunc(parsed), MIN_AI_MAX_TOKENS), MAX_AI_MAX_TOKENS);
     }
   }
 

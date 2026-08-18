@@ -194,7 +194,10 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
 
   // Montar um projeto inteiro leva muito mais passos do que ajustar um vhost.
   const maxIterations = session.mode === 'full' ? MAX_ITERATIONS_LAB : MAX_ITERATIONS;
-  const maxTokens = session.mode === 'full' ? MAX_TOKENS_LAB : MAX_TOKENS_DEFAULT;
+  // Configurações manda: zero (o padrão) mantém o teto por modo.
+  const maxTokens = appConfig.aiMaxTokens > 0
+    ? appConfig.aiMaxTokens
+    : session.mode === 'full' ? MAX_TOKENS_LAB : MAX_TOKENS_DEFAULT;
 
   send(res, { type: 'session', sessionId: session.id, title: session.title, mode: session.mode });
 
