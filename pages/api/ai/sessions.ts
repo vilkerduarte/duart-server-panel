@@ -2,6 +2,7 @@ import type { NextApiResponse } from 'next';
 import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
 import { listSessions, createSession, deleteSession } from '@/lib/ai/sessions';
 import { readConfig } from '@/lib/data/config';
+import { normalizeAiMode } from '@/lib/ai/modes';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
   if (req.method === 'GET') {
@@ -11,7 +12,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
   if (req.method === 'POST') {
     const config = readConfig();
     const session = createSession({
-      mode: req.body?.mode ?? config.aiDefaultMode,
+      mode: normalizeAiMode(req.body?.mode, normalizeAiMode(config.aiDefaultMode)),
       model: config.aiModel,
     });
     return res.status(200).json({ success: true, data: session });

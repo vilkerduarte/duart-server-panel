@@ -100,13 +100,24 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
   }
 
   try {
-    const [cpuPercent, memResult, diskResult, loadResult, hostnameResult] = await Promise.all([
+    const [cpuPercent, memResult, diskResult, loadResult, hostnameResult, inodeResult] = await Promise.all([
       sampleCpu(),
       executeCommand('mem_info'),
       executeCommand('disk_info'),
       executeCommand('load_info'),
       executeCommand('hostname_get'),
+      executeCommand('disk_inodes').catch(() => ({ stdout: '', stderr: '', code: 1 })),
     ]);
+
+    // Uso de inodes por ponto de montagem (df -i). Ausente fora do Linux/GNU.
+    const inodeByMount: Record<string, number> = {};
+    if (inodeResult.code === 0) {
+      for (const line of inodeResult.stdout.split('\n').slice(1)) {
+        const [target, pcent] = line.trim().split(/\s+/);
+        const value = parseInt((pcent ?? '').replace('%', ''), 10);
+        if (target && !Number.isNaN(value)) inodeByMount[target] = value;
+      }
+    }
 
     const mem = parseMeminfo(memResult.stdout);
     const memTotal = mem.MemTotal ?? 0;
@@ -126,6 +137,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         free: parseSize(parts[4] ?? '0'),
         percent: parseInt((parts[5] ?? '0').replace('%', ''), 10) || 0,
         mount: parts[6] ?? '',
+        inodePercent: inodeByMount[parts[6] ?? ''] ?? null,
       };
     }).filter(d => d.total > 0 && !/^(tmpfs|devtmpfs|squashfs|overlay)$/.test(d.fstype));
 
@@ -150,6 +162,8 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           free: memAvailable,
           available: memAvailable,
           percent: memTotal ? Math.round((memUsed / memTotal) * 100) : 0,
+          buffers: mem.Buffers ?? 0,
+          cached: (mem.Cached ?? 0) + (mem.SReclaimable ?? 0),
           swapTotal: mem.SwapTotal ?? 0,
           swapUsed: Math.max(0, (mem.SwapTotal ?? 0) - (mem.SwapFree ?? 0)),
         },

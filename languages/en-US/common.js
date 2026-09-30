@@ -51,5 +51,7 @@ module.exports = {
     export: "Export",
     import: "Import",
     apply: "Apply",
+    nav: {"dashboard":"Dashboard","monitor":"Monitor","files":"Files","tasks":"Tasks","nginx":"NGINX","php":"PHP","python":"Python","firewall":"Firewall","docker":"Docker","databases":"Databases","security":"Security","ssl":"SSL/TLS","cron":"Cron","backup":"Backup","logs":"Logs","pm2":"PM2","network":"Network","settings":"Settings","collapse":"Collapse menu","expand":"Expand menu","openMenu":"Open menu","closeMenu":"Close menu","main":"Main navigation"},
+    header: {"search":"Search commands, files, services…","searchAria":"Open AI assistant and search","theme":"Toggle theme","themeLight":"Switch to light theme","themeDark":"Switch to dark theme","notifications":"Notifications","userMenu":"User menu","logout":"Log out","home":"Home","breadcrumb":"Breadcrumb","askAi":"AI assistant"},
   }
 };

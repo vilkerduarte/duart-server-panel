@@ -25,7 +25,7 @@ Painel web de gerenciamento de servidores Linux desenvolvido com **Next.js 16** 
 | 15 | **Modo de Recuperação** | Recovery mode se NGINX quebrar |
 | 16 | **PHP** | Detecção e instalação de versões, pool FPM dedicado por site, limites e diagnóstico de 502 |
 | 17 | **Python** | venv, gunicorn e unidade systemd por aplicação, com reload gracioso |
-| 18 | **IA Assistant** | Agente com ferramentas (`Ctrl+5`): três modos de aprovação, diff antes de gravar, journal auditável |
+| 18 | **IA Assistant** | Agente com ferramentas (`Ctrl+K`): cinco abas (Conversa, Analisar, Executar, Gerar, Aprender), consulta livre, Acesso Total opcional, diff antes de gravar, journal auditável |
 | 19 | **Configurações** | Hostname, idioma (PT/EN/ES), tema dark/light, API key |
 | 20 | **i18n** | Português (padrão), Inglês, Espanhol |
 
@@ -212,30 +212,46 @@ O Duart Panel utiliza o **Next.js como servidor completo** (páginas + API), com
 
 ---
 
-## Modo laboratório
+## Assistente de IA: modos e Acesso Total
 
-Além dos três modos normais do assistente (Leitura, Assistido, Autônomo), há um
-quarto — **Laboratório** — em que a IA executa qualquer coisa no servidor sem
-pedir aprovação: qualquer comando, escrita em qualquer caminho, instalação de
-qualquer pacote, e alteração do **código do próprio painel**.
+O assistente abre com **Ctrl+K** (ou pela barra de busca do cabeçalho) e tem cinco
+abas. Cada uma é uma intenção de uso e define quais ferramentas o modelo recebe:
 
-Ele vem desligado e só aparece depois de ser habilitado em
-**Configurações → Integração IA → Liberar o modo laboratório**. A ideia é que
-ligá-lo seja uma decisão consciente, não um clique de menu.
+| Aba | O que faz | Altera o servidor? |
+|---|---|---|
+| **Conversa** | Tira dúvidas e consulta o servidor | Não |
+| **Analisar** | Mede, compara e explica com tabelas e gráficos | Não |
+| **Executar** | Faz a tarefa de ponta a ponta: investiga, altera, verifica | Sim |
+| **Gerar** | Cria arquivos e configurações (vhosts, units, scripts, projetos) | Só grava arquivos |
+| **Aprender** | Explica conceitos com exemplos reais deste servidor | Não |
 
-**Para que serve:** montar um projeto inteiro numa sessão — criar os arquivos,
-instalar dependências, subir o processo, criar o vhost, emitir o certificado e
-verificar o resultado — sem parar a cada passo. Nesse modo o assistente ganha
-ferramentas próprias:
+**Consulta é sempre livre.** Em qualquer aba, com ou sem Acesso Total, a IA lê
+qualquer arquivo, diretório e log do servidor (`read_file`, `list_directory`,
+`find_files`, `search_code`, `disk_usage`, `file_info`, `read_log`) e roda
+comandos de consulta (`run_readonly`: `docker inspect`, `journalctl`, `ss`, `ps`,
+`curl -I`, `nginx -T`…) sem pedir aprovação. `run_readonly` não usa shell: aceita
+só programas de leitura ligados por `|`, e recusa redirecionamento, `;`, `&&`,
+`$(...)` e opções que escrevem (`find -delete`, `tail -f`, `systemctl restart`…).
+Consultar não depende de nenhuma configuração; o que se controla é *alterar*.
 
-| Ferramenta | Para quê |
-|---|---|
-| `write_files` | Grava vários arquivos numa chamada só (estrutura de projeto) |
-| `apply_patch` | Aplica diff unificado, em vez de reescrever o arquivo inteiro |
-| `search_code` | Localiza código num projeto antes de editar |
-| `install_packages` | Instala qualquer pacote do apt |
-| `panel_self_update` | Valida e aplica alterações no código do painel |
-| `panel_snapshots` | Lista, cria e restaura snapshots do painel |
+**Acesso Total** (Configurações → Integração IA) é o interruptor que decide o
+quanto o **Executar** e o **Gerar** podem fazer sozinhos. Vem desligado.
+
+| | Sem Acesso Total | Com Acesso Total |
+|---|---|---|
+| Aprovação | Toda alteração mostra o comando ou diff e espera o seu OK | Nenhuma |
+| Escrita de arquivos | Só nos diretórios permitidos do painel | Qualquer caminho |
+| Executar: ferramentas extras | — | `install_packages`, `panel_self_update`, `panel_snapshots` |
+| Executar: comandos | `run_command` com aprovação | `run_command` livre, timeout de até 30 min |
+| Gerar | Grava com aprovação | Grava em qualquer caminho |
+
+Conversa, Analisar e Aprender nunca alteram nada, mesmo com o Acesso Total ligado.
+Desligar o interruptor vale já na próxima mensagem, inclusive em conversas antigas.
+
+Com ele ligado, o assistente pode montar um projeto inteiro numa sessão — criar os
+arquivos (`write_files`), instalar dependências, subir o processo, criar o vhost,
+emitir o certificado e verificar o resultado — e até alterar o **código do próprio
+painel**.
 
 **O que continua protegendo, mesmo sem aprovação.** Nada disso é um portão —
 são redes, e existem porque o erro caro aqui é perder o acesso ao servidor:
@@ -250,8 +266,21 @@ são redes, e existem porque o erro caro aqui é perder o acesso ao servidor:
 - escrita de vhost continua transacional, revertendo se o `nginx -t` reprovar.
 
 **O que não protege:** `rm -rf` no caminho errado, apagar um banco, formatar um
-disco. Nesse modo o assistente tem o mesmo poder que você tem no terminal como
-root — que é exatamente o ponto. Use em servidor dedicado a testes.
+disco. Com o Acesso Total o assistente tem o mesmo poder que você tem no terminal
+como root — que é exatamente o ponto. Use em servidor dedicado a testes.
+
+**Atenção ao que a consulta livre implica:** a IA pode ler qualquer arquivo, e o
+conteúdo lido é enviado ao provedor de modelo configurado. Isso inclui segredos que
+estejam no disco (`.env`, chaves, o arquivo de configuração do painel). O prompt
+pede para não repetir segredos na resposta, mas isso não impede que o texto trafegue.
+
+**Respostas visuais.** Nas abas de análise a IA pode devolver tabelas markdown e
+gráficos (barras, rosca, linha) por um bloco ```` ```chart ```` com JSON; a interface
+os desenha sem biblioteca externa. Em tarefas longas ela publica um plano
+(`update_plan`) que aparece ao lado como lista de passos com estado.
+
+**Idiomas.** A interface, as mensagens do servidor e a resposta da IA seguem o
+idioma escolhido em Configurações (pt-BR, en-US, es-ES).
 
 Snapshots do painel ficam em `/var/lib/duart-panel/backups/panel/` (os 10 mais
 recentes). Para reverter à mão:

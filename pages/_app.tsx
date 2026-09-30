@@ -1,6 +1,6 @@
 import "@/styles/globals.css";
 import type { AppProps } from "next/app";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ThemeProvider } from "@/lib/contexts/ThemeContext";
 import { I18nProvider } from "@/lib/contexts/I18nContext";
 import { AuthProvider, useAuth } from "@/lib/contexts/AuthContext";
@@ -14,8 +14,17 @@ function AppContent({ Component, pageProps }: AppProps) {
   const [aiOpen, setAiOpen] = useState(false);
 
   useKeyboard([
+    { key: 'k', ctrl: true, handler: () => setAiOpen(prev => !prev) },
+    // Atalho anterior, mantido para quem já o usa.
     { key: '5', ctrl: true, handler: () => setAiOpen(prev => !prev) },
   ]);
+
+  // O cabeçalho abre o assistente por evento para não depender deste componente.
+  useEffect(() => {
+    const open = () => setAiOpen(true);
+    window.addEventListener('duart:open-ai', open);
+    return () => window.removeEventListener('duart:open-ai', open);
+  }, []);
 
   if (isLoading) {
     return (

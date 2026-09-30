@@ -4,12 +4,14 @@ interface CardProps {
   children: ReactNode;
   className?: string;
   padding?: boolean;
+  /** Realce da borda: 'amber' destaca o cartão com brilho âmbar. */
+  glow?: 'blue' | 'amber';
 }
 
-export default function Card({ children, className = '', padding = true }: CardProps) {
+export default function Card({ children, className = '', padding = true, glow = 'blue' }: CardProps) {
   return (
     <div
-      className={`rounded-lg border border-[var(--border-color)] bg-[var(--bg-card)] transition-theme ${padding ? 'p-4' : ''} ${className}`}
+      className={`glass-card glow-border ${glow === 'amber' ? 'glow-border--amber glass-card--amber' : ''} rounded-2xl ${padding ? 'p-4' : ''} ${className}`}
     >
       {children}
     </div>

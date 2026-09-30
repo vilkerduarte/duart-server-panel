@@ -51,5 +51,7 @@ module.exports = {
     export: "Exportar",
     import: "Importar",
     apply: "Aplicar",
+    nav: {"dashboard":"Dashboard","monitor":"Monitor","files":"Archivos","tasks":"Tareas","nginx":"NGINX","php":"PHP","python":"Python","firewall":"Firewall","docker":"Docker","databases":"Bases de datos","security":"Seguridad","ssl":"SSL/TLS","cron":"Cron","backup":"Backup","logs":"Logs","pm2":"PM2","network":"Red","settings":"Ajustes","collapse":"Contraer menú","expand":"Expandir menú","openMenu":"Abrir menú","closeMenu":"Cerrar menú","main":"Navegación principal"},
+    header: {"search":"Buscar comandos, archivos, servicios…","searchAria":"Abrir asistente de IA y buscar","theme":"Cambiar tema","themeLight":"Cambiar a tema claro","themeDark":"Cambiar a tema oscuro","notifications":"Notificaciones","userMenu":"Menú de usuario","logout":"Salir","home":"Inicio","breadcrumb":"Ruta de navegación","askAi":"Asistente de IA"},
   }
 };

@@ -147,11 +147,15 @@ já estava — o painel é que não mostrava.
 crontab chamando `scripts/renew-ssl.js`, ela vai falhar (o script foi removido).
 O migrador avisa; remova com `crontab -e`.
 
-**A IA muda de comportamento.** Ela agora executa ferramentas de verdade. O modo
-padrão é **Assistido**: lê à vontade e pede aprovação, mostrando diff ou comando
-exato, antes de cada alteração. Se preferir começar sem risco nenhum, mude para
-**Leitura** na barra do assistente. Há também o modo **Laboratório**, desligado
-por padrão — veja o [README](README.md#modo-laboratório).
+**A IA muda de comportamento.** Ela agora executa ferramentas de verdade. Os
+antigos modos de aprovação (Leitura, Assistido, Autônomo, Laboratório) viraram
+cinco abas — Conversa, Analisar, Executar, Gerar e Aprender — e o Laboratório
+virou o interruptor **Acesso Total** em Configurações. Quem tinha o laboratório
+ligado continua com ele ligado como Acesso Total (a configuração é migrada
+sozinha); conversas antigas abrem na aba Executar (as que eram só leitura, em
+Conversa). Sem Acesso Total, o Executar pede aprovação para cada alteração,
+mostrando diff ou comando exato. A consulta de arquivos e comandos de leitura é
+livre em todas as abas. Veja o [README](README.md#assistente-de-ia-modos-e-acesso-total).
 
 **Backups de vhost saem de `sites-available`.** Versões anteriores gravavam
 `dominio.bak-<timestamp>` dentro de `/etc/nginx/sites-available/`, e como o

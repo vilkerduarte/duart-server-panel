@@ -7,6 +7,7 @@ import { unifiedDiff } from '../lib/diff';
 import { buildArgv, COMMAND_WHITELIST } from '../lib/system';
 import { validateConversation, pruneUnansweredCalls, sanitizeConversation, trimConversation } from '../lib/ai/sessions';
 import { toolsForMode, requiresApproval, ALL_TOOLS } from '../lib/ai/tools';
+import { normalizeAiMode } from '../lib/ai/modes';
 
 /**
  * Testes das barreiras de segurança e das funções de validação.
@@ -243,41 +244,72 @@ describe('histórico enviado ao provedor', () => {
   });
 });
 
-describe('modo laboratório', () => {
-  const labToolNames = ['write_files', 'apply_patch', 'search_code', 'install_packages', 'panel_self_update', 'panel_snapshots'];
+describe('modos do assistente e Acesso Total', () => {
+  const fullAccessOnly = ['install_packages', 'panel_self_update', 'panel_snapshots'];
+  const readEverywhere = [
+    'read_file', 'list_directory', 'find_files', 'disk_usage', 'file_info', 'search_code',
+    'read_log', 'run_readonly',
+  ];
+  const names = (mode: Parameters<typeof toolsForMode>[0], full = false) => toolsForMode(mode, full).map(t => t.name);
 
-  it('expõe as ferramentas de laboratório apenas no modo full', () => {
-    const full = toolsForMode('full').map(t => t.name);
-    const autonomous = toolsForMode('autonomous').map(t => t.name);
-    const assisted = toolsForMode('assisted').map(t => t.name);
-
-    for (const name of labToolNames) {
-      expect(full, `full deveria ter ${name}`).toContain(name);
-      expect(autonomous, `autonomous não deveria ter ${name}`).not.toContain(name);
-      expect(assisted, `assisted não deveria ter ${name}`).not.toContain(name);
+  it('só o Executar com Acesso Total recebe instalação de pacotes e auto-atualização', () => {
+    for (const name of fullAccessOnly) {
+      expect(names('execute', true), name).toContain(name);
+      expect(names('execute', false), name).not.toContain(name);
+      expect(names('generate', true), name).not.toContain(name);
+      expect(names('chat', true), name).not.toContain(name);
     }
   });
 
-  it('modo leitura não expõe nenhuma ferramenta de escrita', () => {
-    for (const tool of toolsForMode('read')) {
-      expect(tool.risk, `${tool.name} não é somente-leitura`).toBe('read');
+  it('a consulta livre está em todos os modos, com ou sem Acesso Total', () => {
+    for (const mode of ['chat', 'analyze', 'learn', 'generate', 'execute'] as const) {
+      for (const full of [false, true]) {
+        for (const name of readEverywhere) {
+          expect(names(mode, full), `${mode}/${full} deveria ter ${name}`).toContain(name);
+        }
+      }
     }
   });
 
-  it('não pede aprovação para nada no modo laboratório', () => {
-    for (const tool of toolsForMode('full')) {
-      expect(requiresApproval(tool, { command: 'rm -rf /tmp/x' }, 'full')).toBe(false);
+  it('Conversa, Analisar e Aprender não expõem nenhuma ferramenta que escreve', () => {
+    for (const mode of ['chat', 'analyze', 'learn'] as const) {
+      for (const tool of toolsForMode(mode, true)) {
+        expect(tool.risk, `${mode}: ${tool.name} não é somente-leitura`).toBe('read');
+      }
     }
   });
 
-  it('mantém os portões nos demais modos', () => {
+  it('Gerar escreve arquivos mas não executa comandos nem mexe em serviços', () => {
+    const generate = names('generate', true);
+    expect(generate).toEqual(expect.arrayContaining(['write_file', 'write_files', 'apply_patch']));
+    for (const name of ['run_command', 'service_action', 'firewall_rule', 'delete_file', 'remove_site']) {
+      expect(generate, name).not.toContain(name);
+    }
+  });
+
+  it('sem Acesso Total toda escrita pede aprovação; com ele, nenhuma', () => {
     const irreversible = ALL_TOOLS.find(t => t.risk === 'irreversible')!;
     const write = ALL_TOOLS.find(t => t.risk === 'write')!;
 
-    expect(requiresApproval(irreversible, {}, 'autonomous')).toBe(true);
-    expect(requiresApproval(write, {}, 'autonomous')).toBe(false);
-    expect(requiresApproval(write, {}, 'assisted')).toBe(true);
-    expect(requiresApproval(write, {}, 'read')).toBe(true);
+    for (const tool of [irreversible, write]) {
+      expect(requiresApproval(tool, {}, { mode: 'execute', fullAccess: false })).toBe(true);
+      expect(requiresApproval(tool, {}, { mode: 'generate', fullAccess: false })).toBe(true);
+      expect(requiresApproval(tool, {}, { mode: 'execute', fullAccess: true })).toBe(false);
+      expect(requiresApproval(tool, {}, { mode: 'generate', fullAccess: true })).toBe(false);
+    }
+  });
+
+  it('o Acesso Total não solta a escrita nos modos somente-consulta', () => {
+    const write = ALL_TOOLS.find(t => t.risk === 'write')!;
+    expect(requiresApproval(write, {}, { mode: 'chat', fullAccess: true })).toBe(true);
+  });
+
+  it('leitura nunca pede aprovação', () => {
+    for (const tool of ALL_TOOLS.filter(t => t.risk === 'read')) {
+      for (const mode of ['chat', 'analyze', 'learn', 'generate', 'execute'] as const) {
+        expect(requiresApproval(tool, {}, { mode, fullAccess: false })).toBe(false);
+      }
+    }
   });
 
   it('toda ferramenta declara um schema de parâmetros válido', () => {

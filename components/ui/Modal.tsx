@@ -1,4 +1,5 @@
 import { ReactNode, useEffect } from 'react';
+import { useI18n } from '@/lib/contexts/I18nContext';
 
 interface ModalProps {
   open: boolean;
@@ -9,6 +10,7 @@ interface ModalProps {
 }
 
 export default function Modal({ open, onClose, title, children, size = 'md' }: ModalProps) {
+  const { t } = useI18n();
   useEffect(() => {
     if (open) {
       document.body.style.overflow = 'hidden';
@@ -36,13 +38,17 @@ export default function Modal({ open, onClose, title, children, size = 'md' }: M
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
       <div
-        className={`relative w-full ${sizeClasses[size]} bg-[var(--bg-card)] border border-[var(--border-color)] rounded-xl shadow-2xl animate-fade-in max-h-[85vh] flex flex-col`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={`relative w-full ${sizeClasses[size]} bg-[var(--bg-card)] border border-[var(--glass-border)] rounded-2xl shadow-[0_0_40px_var(--glow-blue)] animate-fade-in max-h-[85vh] flex flex-col`}
       >
         {title && (
           <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-color)]">
             <h2 className="text-lg font-semibold text-[var(--text-primary)]">{title}</h2>
             <button
               onClick={onClose}
+              aria-label={t('common.close')}
               className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-xl leading-none p-1"
             >
               &times;

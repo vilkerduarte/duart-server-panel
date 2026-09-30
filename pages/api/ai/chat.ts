@@ -3,14 +3,16 @@ import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
 import { readConfig } from '@/lib/data/config';
 import { createAiClient, buildSystemPrompt, gatherServerContext, PROVIDER_PRESETS } from '@/lib/ai/client';
 import {
-  TOOL_MAP, toolsForMode, toOpenAiTools, requiresApproval, buildPreview,
+  TOOL_MAP, toolsForMode, toOpenAiTools, requiresApproval, buildPreview, describeCall, isUnrestricted,
   ToolContext, ToolDefinition,
 } from '@/lib/ai/tools';
+import { AiMode, isAiMode, normalizeAiMode, canWrite } from '@/lib/ai/modes';
+import { tr, normalizeLocale, Locale } from '@/lib/ai/messages';
 import { appendJournal } from '@/lib/ai/journal';
 import {
   createSession, loadSession, saveSession, deriveTitle,
   sanitizeConversation, trimConversation,
-  AiSession, ChatMessage, PendingApproval, ApprovalMode, ToolCallRecord,
+  AiSession, ChatMessage, PendingApproval, ToolCallRecord,
 } from '@/lib/ai/sessions';
 
 /**
@@ -28,26 +30,41 @@ import {
  * de onde parou.
  */
 
-const MAX_ITERATIONS = 12;
-/** Montar um projeto do zero gasta muito mais passos que ajustar um vhost. */
-const MAX_ITERATIONS_LAB = 60;
-const MAX_TOOL_RESULT_CHARS = 12000;
+/** Passos por mensagem, por modo. Executar com Acesso Total monta projetos inteiros. */
+const MAX_ITERATIONS: Record<AiMode, number> = { chat: 16, analyze: 24, learn: 16, generate: 30, execute: 24 };
+const MAX_ITERATIONS_FULL_ACCESS = 60;
+const MAX_TOOL_RESULT_CHARS = 24000;
+/** Quanto da saída de cada ferramenta vai para o painel de saída da interface. */
+const MAX_OUTPUT_PREVIEW_CHARS = 6000;
 
 /** Teto do histórico enviado por requisição, deixando folga para prompt e resposta. */
 const MAX_CONTEXT_CHARS = 240_000;
 
 /** Escrever arquivos inteiros numa chamada precisa de bem mais que 4096 tokens. */
 const MAX_TOKENS_DEFAULT = 4096;
-const MAX_TOKENS_LAB = 8192;
+const MAX_TOKENS_WRITING = 8192;
+
+/**
+ * Como o resultado de uma ferramenta aparece na interface. A tela traduz pelo
+ * código; `detail` só carrega texto quando é o erro devolvido pela ferramenta.
+ */
+type ToolOutcome = 'done' | 'error' | 'rejected' | 'truncated' | 'unavailable';
+
+interface PlanStep { title: string; status: 'pending' | 'running' | 'done' | 'failed' }
 
 type SseEvent =
-  | { type: 'session'; sessionId: string; title: string; mode: ApprovalMode }
+  | { type: 'session'; sessionId: string; title: string; mode: AiMode; fullAccess: boolean }
   | { type: 'chunk'; content: string }
-  | { type: 'tool_start'; name: string; summary: string }
-  | { type: 'tool_result'; name: string; ok: boolean; summary: string }
+  | { type: 'notice'; code: string; params?: Record<string, string | number>; content: string }
+  | { type: 'tool_start'; id: string; name: string; detail: string }
+  | {
+      type: 'tool_result'; id: string; name: string; ok: boolean; code: ToolOutcome;
+      detail?: string; durationMs: number; output?: string;
+    }
+  | { type: 'plan'; steps: PlanStep[] }
   | { type: 'approval_required'; pending: PendingApproval[] }
   | { type: 'done'; sessionId: string; title: string; iterations: number }
-  | { type: 'error'; content: string };
+  | { type: 'error'; code: string; params?: Record<string, string | number>; content: string };
 
 function send(res: NextApiResponse, event: SseEvent): void {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -66,25 +83,52 @@ function parseArgs(raw: string): Record<string, any> {
   }
 }
 
+/** O que vale mostrar no painel de saída: stdout/stderr quando houver, senão o resultado compacto. */
+function outputForUi(result: { ok: boolean; data?: unknown; error?: string }): string | undefined {
+  const data = result.data as { stdout?: string; stderr?: string } | undefined;
+  let text = '';
+
+  if (data && typeof data === 'object' && ('stdout' in data || 'stderr' in data)) {
+    text = [data.stdout, data.stderr].filter(Boolean).join('\n');
+  } else if (result.data !== undefined) {
+    try { text = JSON.stringify(result.data, null, 2); } catch { text = String(result.data); }
+  }
+  if (!result.ok && result.error) text = [text, result.error].filter(Boolean).join('\n');
+
+  text = text.trim();
+  if (!text) return undefined;
+  return text.length > MAX_OUTPUT_PREVIEW_CHARS ? `${text.slice(0, MAX_OUTPUT_PREVIEW_CHARS)}\n…` : text;
+}
+
+interface ToolRun {
+  ok: boolean;
+  payload: string;
+  detail?: string;
+  durationMs: number;
+  output?: string;
+  data?: unknown;
+}
+
 /** Executa uma ferramenta, registra no journal e devolve o texto para o modelo. */
 async function runTool(
   tool: ToolDefinition,
   args: Record<string, any>,
   ctx: ToolContext,
-): Promise<{ ok: boolean; payload: string; summary: string }> {
+): Promise<ToolRun> {
   const startedAt = Date.now();
 
   try {
     const result = await tool.execute(args, ctx);
+    const durationMs = Date.now() - startedAt;
 
     appendJournal({
       sessionId: ctx.sessionId,
       user: ctx.user,
-      mode: ctx.mode,
+      mode: `${ctx.mode}${ctx.fullAccess ? '+full' : ''}`,
       tool: tool.name,
       args,
       outcome: result.ok ? 'ok' : 'error',
-      durationMs: Date.now() - startedAt,
+      durationMs,
       stdout: result.ok ? JSON.stringify(result.data).slice(0, 4000) : undefined,
       stderr: result.error,
       diff: result.diff,
@@ -98,24 +142,43 @@ async function runTool(
     return {
       ok: result.ok,
       payload: truncateForModel(payload),
-      summary: result.ok ? 'concluído' : (result.error ?? 'falhou').substring(0, 160),
+      detail: result.ok ? undefined : (result.error ?? '').substring(0, 200),
+      durationMs,
+      output: outputForUi(result),
+      data: result.data,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const durationMs = Date.now() - startedAt;
 
     appendJournal({
       sessionId: ctx.sessionId,
       user: ctx.user,
-      mode: ctx.mode,
+      mode: `${ctx.mode}${ctx.fullAccess ? '+full' : ''}`,
       tool: tool.name,
       args,
       outcome: 'error',
-      durationMs: Date.now() - startedAt,
+      durationMs,
       stderr: message,
     });
 
-    return { ok: false, payload: JSON.stringify({ ok: false, error: message }), summary: message.substring(0, 160) };
+    return {
+      ok: false, payload: JSON.stringify({ ok: false, error: message }),
+      detail: message.substring(0, 200), durationMs, output: message.substring(0, MAX_OUTPUT_PREVIEW_CHARS),
+    };
   }
+}
+
+/** Emite start + result de uma chamada que já foi executada. */
+function reportTool(res: NextApiResponse, id: string, tool: ToolDefinition, run: ToolRun): void {
+  // O plano aparece como lista própria na interface, não como passo executado.
+  if (tool.name === 'update_plan') {
+    const steps = (run.data as { steps?: PlanStep[] } | undefined)?.steps;
+    if (run.ok && steps?.length) send(res, { type: 'plan', steps });
+    return;
+  }
+
+  send(res, { type: 'tool_result', id, name: tool.name, ok: run.ok, code: run.ok ? 'done' : 'error', detail: run.detail, durationMs: run.durationMs, output: run.output });
 }
 
 export const config = {
@@ -125,16 +188,50 @@ export const config = {
   },
 };
 
+/** Classifica o erro do provedor num código que a interface traduz. */
+function classifyError(message: string, model: string): {
+  code: string; params?: Record<string, string | number>; historyWasInvalid: boolean;
+} {
+  // A ordem importa: os padrões específicos vêm antes dos genéricos. Testar
+  // /tool|function.?call/ cedo demais captura "content or tool_calls must be
+  // set" — um bug de histórico — e diagnostica como "modelo sem function calling".
+  if (/401|403|authentication|invalid_api_key|no permission/i.test(message)) {
+    return { code: 'auth', historyWasInvalid: false };
+  }
+  if (/429|rate.?limit|quota|insufficient.?balance/i.test(message)) {
+    return { code: 'rateLimit', historyWasInvalid: false };
+  }
+  if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up/i.test(message)) {
+    return { code: 'timeout', historyWasInvalid: false };
+  }
+  if (/content or tool_calls must be set|invalid assistant message/i.test(message)) {
+    return { code: 'badHistory', historyWasInvalid: true };
+  }
+  if (/tool.?call.*not.*support|does not support tools|unsupported.*function.?call/i.test(message)) {
+    return { code: 'noFunctionCalling', params: { model }, historyWasInvalid: false };
+  }
+  if (/maximum context length|context_length_exceeded|too long/i.test(message)) {
+    return { code: 'context', historyWasInvalid: true };
+  }
+  if (/model.*(not found|does not exist)|invalid model/i.test(message)) {
+    return { code: 'modelNotFound', params: { model }, historyWasInvalid: false };
+  }
+  return { code: 'generic', historyWasInvalid: false };
+}
+
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
+  const locale: Locale = normalizeLocale(req.body?.locale);
+
   if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, error: 'Método não permitido' });
+    return res.status(405).json({ success: false, error: tr(locale, 'error.methodNotAllowed') });
   }
 
   const appConfig = readConfig();
   if (!appConfig.aiApiKey) {
     return res.status(400).json({
       success: false,
-      error: 'Chave de API não configurada. Defina-a em Configurações.',
+      code: 'noApiKey',
+      error: tr(locale, 'error.noApiKey'),
     });
   }
 
@@ -143,28 +240,19 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
   let session: AiSession | null = sessionId ? loadSession(String(sessionId)) : null;
   if (!session) {
     session = createSession({
-      mode: (requestedMode as ApprovalMode) ?? (appConfig.aiDefaultMode as ApprovalMode) ?? 'assisted',
+      mode: isAiMode(requestedMode) ? requestedMode : normalizeAiMode(appConfig.aiDefaultMode),
       model: appConfig.aiModel,
     });
   }
-  if (requestedMode && ['read', 'assisted', 'autonomous', 'full'].includes(requestedMode)) {
-    // O modo laboratório precisa de liberação explícita na configuração: sem ela
-    // a sessão cai para assistido em vez de falhar silenciosamente em cada ação.
-    if (requestedMode === 'full' && !appConfig.aiUnrestrictedEnabled) {
-      return res.status(403).json({
-        success: false,
-        error: 'O modo laboratório está desligado. Ative-o em Configurações → IA antes de usá-lo.',
-        code: 'UNRESTRICTED_DISABLED',
-      });
-    }
-    session.mode = requestedMode;
+  if (requestedMode !== undefined) {
+    session.mode = normalizeAiMode(requestedMode, session.mode);
   }
 
-  // Uma sessão salva em modo laboratório não pode reabrir irrestrita depois de
-  // a configuração ser desligada.
-  if (session.mode === 'full' && !appConfig.aiUnrestrictedEnabled) {
-    session.mode = 'assisted';
-  }
+  // Lido a cada requisição: desligar o Acesso Total na configuração vale já na
+  // próxima mensagem, inclusive para conversas antigas.
+  const fullAccess = Boolean(appConfig.aiFullAccess);
+  const policy = { mode: session.mode, fullAccess };
+  const unrestricted = isUnrestricted(policy);
 
   const userMessage = typeof message === 'string' ? message.trim() : '';
   if (userMessage) {
@@ -175,7 +263,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
   }
 
   if (!userMessage && !approvals?.length && !session.pending?.length) {
-    return res.status(400).json({ success: false, error: 'Envie uma mensagem ou uma decisão de aprovação' });
+    return res.status(400).json({ success: false, error: tr(locale, 'error.needInput') });
   }
 
   res.writeHead(200, {
@@ -189,29 +277,39 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
     user: req.user?.username ?? 'desconhecido',
     sessionId: session.id,
     mode: session.mode,
-    unrestricted: session.mode === 'full',
+    fullAccess,
+    unrestricted,
+    locale,
   };
 
-  // Montar um projeto inteiro leva muito mais passos do que ajustar um vhost.
-  const maxIterations = session.mode === 'full' ? MAX_ITERATIONS_LAB : MAX_ITERATIONS;
+  const maxIterations = unrestricted && session.mode === 'execute'
+    ? MAX_ITERATIONS_FULL_ACCESS
+    : MAX_ITERATIONS[session.mode];
   // Configurações manda: zero (o padrão) mantém o teto por modo.
   const maxTokens = appConfig.aiMaxTokens > 0
     ? appConfig.aiMaxTokens
-    : session.mode === 'full' ? MAX_TOKENS_LAB : MAX_TOKENS_DEFAULT;
+    : canWrite(session.mode) ? MAX_TOKENS_WRITING : MAX_TOKENS_DEFAULT;
 
-  send(res, { type: 'session', sessionId: session.id, title: session.title, mode: session.mode });
+  send(res, { type: 'session', sessionId: session.id, title: session.title, mode: session.mode, fullAccess });
+
+  // "Parar" na interface fecha a conexão; o laço precisa notar e não seguir
+  // executando ferramentas que ninguém está mais acompanhando.
+  let clientGone = false;
+  res.on('close', () => { if (!res.writableEnded) clientGone = true; });
+
+  const model = appConfig.aiModel || PROVIDER_PRESETS.deepseek.defaultModel;
 
   try {
     const serverContext = await gatherServerContext();
-    const systemPrompt = buildSystemPrompt(serverContext, session.mode);
+    const systemPrompt = buildSystemPrompt(serverContext, { mode: session.mode, fullAccess, locale });
 
-    const tools = toolsForMode(session.mode);
+    const tools = toolsForMode(session.mode, fullAccess);
+    const availableTools = new Set(tools.map(t => t.name));
     const client = createAiClient({
       apiKey: appConfig.aiApiKey,
       baseUrl: appConfig.aiBaseUrl || PROVIDER_PRESETS.deepseek.baseUrl,
       model: appConfig.aiModel,
     });
-    const model = appConfig.aiModel || PROVIDER_PRESETS.deepseek.defaultModel;
 
     /* ---------- Resolve aprovações pendentes antes de retomar ---------- */
 
@@ -236,6 +334,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
 
       for (const pending of session.pending) {
         const approved = decisions.get(pending.toolCallId);
+        const tool = TOOL_MAP.get(pending.tool);
 
         if (!approved) {
           appendJournal({
@@ -247,27 +346,30 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
             role: 'tool',
             tool_call_id: pending.toolCallId,
             name: pending.tool,
-            content: JSON.stringify({ ok: false, error: 'O usuário recusou esta operação. Não tente novamente sem propor uma alternativa.' }),
+            content: JSON.stringify({ ok: false, error: 'The user declined this operation. Do not retry it without proposing an alternative.' }),
           });
-          send(res, { type: 'tool_result', name: pending.tool, ok: false, summary: 'recusado pelo usuário' });
+          send(res, { type: 'tool_result', id: pending.toolCallId, name: pending.tool, ok: false, code: 'rejected', durationMs: 0 });
           continue;
         }
 
-        const tool = TOOL_MAP.get(pending.tool);
-        if (!tool) {
+        // Uma aprovação guardada só vale se a ferramenta ainda estiver ao
+        // alcance do modo atual: o Acesso Total pode ter sido desligado ou a
+        // conversa trocada de aba enquanto a decisão esperava.
+        if (!tool || !availableTools.has(tool.name)) {
           session.messages.push({
             role: 'tool', tool_call_id: pending.toolCallId, name: pending.tool,
-            content: JSON.stringify({ ok: false, error: 'Ferramenta desconhecida' }),
+            content: JSON.stringify({ ok: false, error: 'Tool not available in the current mode.' }),
           });
+          send(res, { type: 'tool_result', id: pending.toolCallId, name: pending.tool, ok: false, code: 'unavailable', durationMs: 0 });
           continue;
         }
 
-        send(res, { type: 'tool_start', name: tool.name, summary: pending.summary });
-        const result = await runTool(tool, pending.args, ctx);
-        send(res, { type: 'tool_result', name: tool.name, ok: result.ok, summary: result.summary });
+        send(res, { type: 'tool_start', id: pending.toolCallId, name: tool.name, detail: describeCall(tool, pending.args) });
+        const run = await runTool(tool, pending.args, ctx);
+        reportTool(res, pending.toolCallId, tool, run);
 
         session.messages.push({
-          role: 'tool', tool_call_id: pending.toolCallId, name: tool.name, content: result.payload,
+          role: 'tool', tool_call_id: pending.toolCallId, name: tool.name, content: run.payload,
         });
       }
 
@@ -279,7 +381,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
 
     let iterations = 0;
 
-    while (iterations < maxIterations) {
+    while (iterations < maxIterations && !clientGone) {
       iterations++;
 
       // Saneia e corta antes de enviar: um turno vazio, uma chamada sem resposta
@@ -287,8 +389,8 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       const trimmed = trimConversation(sanitizeConversation(session.messages), MAX_CONTEXT_CHARS);
       if (trimmed.dropped > 0) {
         send(res, {
-          type: 'chunk',
-          content: `\n\n_(${trimmed.dropped} troca(s) antiga(s) saíram do contexto para caber no limite do modelo.)_\n\n`,
+          type: 'notice', code: 'trimmed', params: { n: trimmed.dropped },
+          content: tr(locale, 'error.trimmed', { n: trimmed.dropped }),
         });
       }
 
@@ -352,29 +454,24 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       /* ---------- Turno vazio: não pode ser gravado ---------- */
 
       // Um assistente sem `content` e sem `tool_calls` é recusado pela API — e
-      // como fica salvo na sessão, envenena toda mensagem seguinte. Antes, o
-      // laço simplesmente encerrava aqui: a tela parava sem erro nenhum e a
-      // conversa ficava inutilizável a partir dali.
+      // como fica salvo na sessão, envenena toda mensagem seguinte.
       if (!assistantText.trim() && calls.length === 0) {
-        const motivo = finishReason === 'length'
-          ? 'A resposta foi cortada pelo limite de tokens antes de produzir qualquer conteúdo. ' +
-            'O contexto provavelmente está grande demais — comece uma conversa nova para esta etapa.'
-          : finishReason === 'content_filter'
-            ? 'O provedor filtrou a resposta.'
-            : reasoningSeen
-              ? 'O modelo raciocinou mas não emitiu resposta nem chamada de ferramenta. ' +
-                'Costuma acontecer quando o contexto está no limite.'
-              : `O modelo devolveu um turno vazio (finish_reason: ${finishReason ?? 'desconhecido'}).`;
+        const kind = finishReason === 'length' ? 'emptyLength'
+          : finishReason === 'content_filter' ? 'emptyFiltered'
+          : reasoningSeen ? 'emptyReasoning'
+          : 'emptyGeneric';
+        const params = { reason: finishReason ?? 'unknown' };
+        const text = tr(locale, `error.${kind}`, params);
 
         appendJournal({
           sessionId: session.id, user: ctx.user, mode: session.mode,
-          tool: '(turno vazio)', args: { finishReason, reasoningSeen, iterations },
-          outcome: 'error', durationMs: 0, stderr: motivo,
+          tool: '(empty turn)', args: { finishReason, reasoningSeen, iterations },
+          outcome: 'error', durationMs: 0, stderr: text,
         });
 
         // A sessão é salva sem a mensagem inválida: ela continua utilizável.
         saveSession(session);
-        send(res, { type: 'error', content: `${motivo} Nada foi perdido — a conversa segue utilizável.` });
+        send(res, { type: 'error', code: kind, params, content: text });
         send(res, { type: 'done', sessionId: session.id, title: session.title, iterations });
         res.end();
         return;
@@ -395,13 +492,13 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
             role: 'tool', tool_call_id: call.id, name: call.function.name,
             content: JSON.stringify({
               ok: false,
-              error: 'A chamada foi cortada pelo limite de tokens e os argumentos vieram incompletos. '
-                + 'Refaça em pedaços menores (menos arquivos por chamada, ou apply_patch em vez de reescrever).',
+              error: 'The call was cut by the token limit and its arguments arrived incomplete. '
+                + 'Redo it in smaller pieces (fewer files per call, or apply_patch instead of rewriting).',
             }),
           });
+          send(res, { type: 'tool_result', id: call.id, name: call.function.name, ok: false, code: 'truncated', durationMs: 0 });
         }
         saveSession(session);
-        send(res, { type: 'tool_result', name: calls[0].function.name, ok: false, summary: 'cortada por limite de tokens' });
         continue;
       }
 
@@ -415,20 +512,32 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       const pending: PendingApproval[] = [];
 
       for (const call of calls) {
+        // Chamadas que sobram sem resposta são podadas por sanitizeConversation.
+        if (clientGone) break;
+
         const toolName = call.function.name;
         const tool = TOOL_MAP.get(toolName);
         const args = parseArgs(call.function.arguments);
 
-        if (!tool) {
+        // Só vale o que o modo atual oferece. Uma chamada fora dele (o modelo
+        // lembrou de uma ferramenta de outra aba) recebe a explicação, em vez
+        // de cair na regra de aprovação.
+        if (!tool || !availableTools.has(toolName)) {
           session.messages.push({
             role: 'tool', tool_call_id: call.id, name: toolName,
-            content: JSON.stringify({ ok: false, error: `Ferramenta desconhecida: ${toolName}` }),
+            content: JSON.stringify({
+              ok: false,
+              error: tool
+                ? `Tool ${toolName} is not available in "${session.mode}" mode. Tell the user which tab or setting enables it.`
+                : `Unknown tool: ${toolName}`,
+            }),
           });
+          send(res, { type: 'tool_result', id: call.id, name: toolName, ok: false, code: 'unavailable', durationMs: 0 });
           continue;
         }
 
-        if (requiresApproval(tool, args, session.mode)) {
-          const preview = await buildPreview(tool, args);
+        if (requiresApproval(tool, args, policy)) {
+          const preview = await buildPreview(tool, args, locale);
           pending.push({
             toolCallId: call.id,
             tool: tool.name,
@@ -441,12 +550,14 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           continue;
         }
 
-        send(res, { type: 'tool_start', name: tool.name, summary: tool.description.slice(0, 80) });
-        const result = await runTool(tool, args, ctx);
-        send(res, { type: 'tool_result', name: tool.name, ok: result.ok, summary: result.summary });
+        if (tool.name !== 'update_plan') {
+          send(res, { type: 'tool_start', id: call.id, name: tool.name, detail: describeCall(tool, args) });
+        }
+        const run = await runTool(tool, args, ctx);
+        reportTool(res, call.id, tool, run);
 
         session.messages.push({
-          role: 'tool', tool_call_id: call.id, name: tool.name, content: result.payload,
+          role: 'tool', tool_call_id: call.id, name: tool.name, content: run.payload,
         });
       }
 
@@ -464,52 +575,25 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       saveSession(session);
     }
 
+    if (clientGone) {
+      saveSession(session);
+      res.end();
+      return;
+    }
+
     if (iterations >= maxIterations) {
       send(res, {
-        type: 'chunk',
-        content: `\n\n_Limite de ${maxIterations} passos atingido. Peça para continuar se a tarefa não terminou._`,
+        type: 'notice', code: 'iterationLimit', params: { n: maxIterations },
+        content: tr(locale, 'error.iterationLimit', { n: maxIterations }),
       });
     }
 
     send(res, { type: 'done', sessionId: session.id, title: session.title, iterations });
     res.end();
   } catch (err: any) {
-    const message = err?.message ?? 'Erro na comunicação com a IA';
-    let historyWasInvalid = false;
-
-    // A ordem importa: os padrões específicos vêm antes dos genéricos. A versão
-    // anterior testava /tool|function.?call/ cedo demais e capturava
-    // "content or tool_calls must be set" — um bug de histórico do painel —
-    // reportando-o como "o modelo não suporta function calling". O diagnóstico
-    // errado mandava trocar o modelo em vez de consertar a sessão.
-    let friendly = message;
-
-    if (/401|403|authentication|invalid_api_key|no permission/i.test(message)) {
-      friendly = 'Chave de API inválida ou sem permissão. Verifique em Configurações.';
-    } else if (/429|rate.?limit|quota|insufficient.?balance/i.test(message)) {
-      friendly = 'Limite ou saldo do provedor atingido. Verifique a conta e aguarde alguns segundos.';
-    } else if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up/i.test(message)) {
-      friendly = 'Timeout na conexão com o provedor de IA. Tente novamente.';
-    } else if (/content or tool_calls must be set|invalid assistant message/i.test(message)) {
-      friendly =
-        'O histórico desta conversa continha uma mensagem inválida (turno vazio do modelo). ' +
-        'Ela foi removida automaticamente — envie a mensagem novamente. ' +
-        'Se voltar a acontecer, o contexto está no limite: comece uma conversa nova.';
-      historyWasInvalid = true;
-    } else if (/tool.?call.*not.*support|does not support tools|unsupported.*function.?call/i.test(message)) {
-      friendly =
-        `O modelo configurado (${readConfig().aiModel}) não suporta function calling, ` +
-        'que é o que permite à IA executar ferramentas. Escolha outro modelo em Configurações.';
-    } else if (/maximum context length|context_length_exceeded|too long/i.test(message)) {
-      friendly =
-        'O contexto da conversa excedeu o limite do modelo. As trocas mais antigas foram descartadas — ' +
-        'reenvie a mensagem, ou comece uma conversa nova para a próxima etapa.';
-      historyWasInvalid = true;
-    } else if (/model.*(not found|does not exist)|invalid model/i.test(message)) {
-      friendly =
-        `O provedor não reconhece o modelo "${readConfig().aiModel}". ` +
-        'Confira o identificador em Configurações → Integração IA.';
-    }
+    const raw = err?.message ?? 'AI communication error';
+    const { code, params, historyWasInvalid } = classifyError(raw, model);
+    const friendly = code === 'generic' ? `${tr(locale, 'error.generic')} ${raw}`.trim() : tr(locale, `error.${code}`, params);
 
     try {
       if (session) {
@@ -518,7 +602,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         if (historyWasInvalid) session.messages = sanitizeConversation(session.messages);
         saveSession(session);
       }
-      send(res, { type: 'error', content: friendly });
+      send(res, { type: 'error', code, params, content: friendly });
       res.end();
     } catch {
       if (!res.headersSent) {

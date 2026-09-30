@@ -37,6 +37,8 @@ export const COMMAND_WHITELIST: Record<string, CommandDefinition> = {
   mem_info: { bin: 'cat', baseArgs: ['/proc/meminfo'], allowedArgs: [], sudo: false, timeout: 5000 },
   load_info: { bin: 'cat', baseArgs: ['/proc/loadavg'], allowedArgs: [], sudo: false, timeout: 5000 },
   disk_info: { bin: 'df', baseArgs: ['-h', '--output=source,fstype,size,used,avail,pcent,target'], allowedArgs: [], sudo: false, timeout: 10000 },
+  disk_inodes: { bin: 'df', baseArgs: ['-i', '--output=target,ipcent'], allowedArgs: [], sudo: false, timeout: 10000 },
+  ps_pid_stats: { bin: 'ps', baseArgs: ['-o', 'pcpu=,pmem=,rss=', '-p'], allowedArgs: [RE_INT], sudo: false, timeout: 5000 },
   network_info: { bin: 'cat', baseArgs: ['/proc/net/dev'], allowedArgs: [], sudo: false, timeout: 5000 },
   connections: { bin: 'ss', baseArgs: ['-s'], allowedArgs: [], sudo: false, timeout: 5000 },
   process_list: { bin: 'ps', baseArgs: ['aux', '--sort=-%cpu'], allowedArgs: [], sudo: false, timeout: 10000 },
@@ -95,6 +97,8 @@ export const COMMAND_WHITELIST: Record<string, CommandDefinition> = {
   systemctl_enable: { bin: 'systemctl', baseArgs: ['enable'], allowedArgs: [RE_UNIT, /^--now$/], sudo: true, timeout: 15000 },
   systemctl_disable: { bin: 'systemctl', baseArgs: ['disable'], allowedArgs: [RE_UNIT, /^--now$/], sudo: true, timeout: 15000 },
   systemctl_daemon_reload: { bin: 'systemctl', baseArgs: ['daemon-reload'], allowedArgs: [], sudo: true, timeout: 15000 },
+  systemctl_list_unit_files: { bin: 'systemctl', baseArgs: ['list-unit-files', '--type=service', '--no-pager', '--plain', '--no-legend'], allowedArgs: [/^[a-zA-Z0-9*_.@-]+$/], sudo: false, timeout: 8000 },
+  systemctl_show_props: { bin: 'systemctl', baseArgs: ['show', '-p', 'ActiveState', '-p', 'MainPID', '-p', 'MemoryCurrent'], allowedArgs: [RE_UNIT], sudo: false, timeout: 5000 },
   systemctl_list_timers: { bin: 'systemctl', baseArgs: ['list-timers', '--all', '--no-pager', '--output=json'], allowedArgs: [], sudo: false, timeout: 10000 },
 
   // Hostname

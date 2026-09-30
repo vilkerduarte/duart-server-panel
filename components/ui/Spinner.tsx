@@ -11,7 +11,7 @@ export default function Spinner({ size = 'md', className = '' }: SpinnerProps) {
   };
 
   return (
-    <div className={`flex justify-center items-center ${className}`}>
+    <div role="status" className={`flex justify-center items-center ${className}`}>
       <div
         className={`${sizeClasses[size]} border-2 border-t-transparent rounded-full animate-spin`}
         style={{ borderColor: 'var(--border-color)', borderTopColor: 'var(--accent)' }}

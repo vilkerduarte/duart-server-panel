@@ -11,19 +11,12 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { readJson, writeJson, ensureDir, withFileLock } from '../fsx';
+import { AiMode, normalizeAiMode } from './modes';
 
 const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 export const SESSIONS_DIR = path.join(DATA_DIR, 'ai', 'sessions');
 
-/**
- * Modos de aprovação.
- *
- * `full` é o modo laboratório: sem portão nenhum, jaula de caminho desligada e
- * ferramentas extras (escrita em lote, patch, auto-atualização do painel). Só
- * fica disponível quando `aiUnrestrictedEnabled` está ligado na configuração —
- * a intenção é que ele exija uma decisão consciente do operador, não um clique.
- */
-export type ApprovalMode = 'read' | 'assisted' | 'autonomous' | 'full';
+export type { AiMode } from './modes';
 
 /**
  * Formato exato que a API espera de volta no histórico.
@@ -63,7 +56,7 @@ export interface PendingApproval {
 export interface AiSession {
   id: string;
   title: string;
-  mode: ApprovalMode;
+  mode: AiMode;
   model: string;
   createdAt: string;
   updatedAt: string;
@@ -79,7 +72,7 @@ const MAX_MESSAGES = 200;
 /**
  * Teto de caracteres do histórico gravado.
  *
- * No modo laboratório o resultado de cada ferramenta chega a 12 mil caracteres
+ * Com Acesso Total o resultado de cada ferramenta chega a 12 mil caracteres
  * e uma sessão passa de 50 chamadas — o contexto do modelo estoura bem antes de
  * 200 mensagens, e o sintoma é o modelo devolver um turno vazio em vez de erro.
  */
@@ -90,12 +83,12 @@ function sessionPath(id: string): string {
   return path.join(SESSIONS_DIR, `${id}.json`);
 }
 
-export function createSession(options: { mode?: ApprovalMode; model?: string } = {}): AiSession {
+export function createSession(options: { mode?: AiMode; model?: string } = {}): AiSession {
   const now = new Date().toISOString();
   const session: AiSession = {
     id: randomUUID(),
     title: 'Nova conversa',
-    mode: options.mode ?? 'assisted',
+    mode: options.mode ?? 'chat',
     model: options.model ?? '',
     createdAt: now,
     updatedAt: now,
@@ -141,7 +134,11 @@ export function loadSession(id: string): AiSession | null {
 
     // Saneia na leitura: conversas que já travaram voltam a funcionar sem que
     // o usuário precise descartá-las.
-    return { ...session, messages: sanitizeConversation(normalizeMessages(session.messages)) };
+    return {
+      ...session,
+      mode: normalizeAiMode(session.mode),
+      messages: sanitizeConversation(normalizeMessages(session.messages)),
+    };
   } catch {
     return null;
   }
@@ -173,7 +170,7 @@ export function updateSession(id: string, mutate: (session: AiSession) => AiSess
 export interface SessionSummary {
   id: string;
   title: string;
-  mode: ApprovalMode;
+  mode: AiMode;
   updatedAt: string;
   messageCount: number;
   hasPending: boolean;
@@ -190,7 +187,7 @@ export function listSessions(limit = 50): SessionSummary[] {
         return {
           id: session.id,
           title: session.title,
-          mode: session.mode,
+          mode: normalizeAiMode(session.mode),
           updatedAt: session.updatedAt,
           messageCount: session.messages.filter(m => m.role === 'user' || m.role === 'assistant').length,
           hasPending: Boolean(session.pending?.length),

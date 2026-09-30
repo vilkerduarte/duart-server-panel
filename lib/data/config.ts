@@ -1,11 +1,10 @@
 import path from 'path';
 import { readJson, writeJson, ensureDir } from '../fsx';
+import { AiMode, DEFAULT_AI_MODE, normalizeAiMode } from '../ai/modes';
 
 const DATA_DIR = process.env.DATA_DIR || '/var/lib/duart-panel';
 const SETTINGS_DIR = path.join(DATA_DIR, 'settings');
 const CONFIG_FILE = path.join(SETTINGS_DIR, 'config.json');
-
-export type AiApprovalMode = 'read' | 'assisted' | 'autonomous' | 'full';
 
 export interface AppConfig {
   serverName: string;
@@ -16,20 +15,21 @@ export interface AppConfig {
   /** Endpoint compatível com a API OpenAI. Vazio usa o preset do DeepSeek. */
   aiBaseUrl: string;
   aiProvider: string;
-  /** Modo de aprovação inicial de cada nova conversa. */
-  aiDefaultMode: AiApprovalMode;
+  /** Modo do assistente ao iniciar uma nova conversa. */
+  aiDefaultMode: AiMode;
   /**
    * Teto de tokens da resposta do modelo por chamada. Zero mantém o padrão do
-   * painel (mais alto no modo laboratório, onde a IA escreve arquivos inteiros).
+   * painel (mais alto quando a IA escreve arquivos inteiros).
    */
   aiMaxTokens: number;
   /**
-   * Libera o modo laboratório: a IA passa a poder executar qualquer coisa no
-   * servidor, escrever em qualquer caminho e alterar o próprio código do painel,
-   * sem pedir aprovação. Desligado por padrão — ligue apenas em servidor
-   * dedicado a testes, porque nesse modo o painel deixa de ter contenção.
+   * Acesso Total. Ligado, os modos Executar e Gerar deixam de pedir aprovação,
+   * escrevem em qualquer caminho e (no Executar) ganham as ferramentas de
+   * instalação de pacotes e alteração do próprio painel. A consulta de
+   * arquivos e comandos de leitura nunca depende disto: é livre sempre.
+   * Desligado por padrão.
    */
-  aiUnrestrictedEnabled: boolean;
+  aiFullAccess: boolean;
   theme: 'dark' | 'light';
   port: number;
   domain: string;
@@ -61,9 +61,9 @@ const DEFAULT_CONFIG: AppConfig = {
   aiModel: 'deepseek-v4-pro',
   aiBaseUrl: '',
   aiProvider: 'deepseek',
-  aiDefaultMode: 'assisted',
+  aiDefaultMode: DEFAULT_AI_MODE,
   aiMaxTokens: 0,
-  aiUnrestrictedEnabled: false,
+  aiFullAccess: false,
   theme: 'dark',
   port: 0,
   domain: '',
@@ -92,10 +92,15 @@ const PROTECTED_FIELDS: Array<keyof AppConfig> = ['installedAt', 'port'];
 
 export function readConfig(): AppConfig {
   ensureDir(SETTINGS_DIR);
-  const stored = readJson<Partial<AppConfig>>(CONFIG_FILE, {});
+  const stored = readJson<Partial<AppConfig> & { aiUnrestrictedEnabled?: boolean }>(CONFIG_FILE, {});
+  // `aiUnrestrictedEnabled` era o "modo laboratório"; virou o Acesso Total.
+  const legacyFullAccess = stored.aiFullAccess === undefined && stored.aiUnrestrictedEnabled === true;
+  delete stored.aiUnrestrictedEnabled;
   return {
     ...DEFAULT_CONFIG,
     ...stored,
+    aiFullAccess: legacyFullAccess ? true : Boolean(stored.aiFullAccess),
+    aiDefaultMode: normalizeAiMode(stored.aiDefaultMode),
     installedModules: { ...DEFAULT_CONFIG.installedModules, ...(stored.installedModules ?? {}) },
   };
 }
@@ -120,6 +125,13 @@ export function writeConfig(updates: Partial<AppConfig>): AppConfig {
     } else {
       sanitized.aiMaxTokens = Math.min(Math.max(Math.trunc(parsed), MIN_AI_MAX_TOKENS), MAX_AI_MAX_TOKENS);
     }
+  }
+
+  if (sanitized.aiDefaultMode !== undefined) {
+    sanitized.aiDefaultMode = normalizeAiMode(sanitized.aiDefaultMode);
+  }
+  if (sanitized.aiFullAccess !== undefined) {
+    sanitized.aiFullAccess = Boolean(sanitized.aiFullAccess);
   }
 
   // Uma chave mascarada chegando de volta significa "não mexer".

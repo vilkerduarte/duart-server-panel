@@ -6,8 +6,9 @@ import Input from '@/components/ui/Input';
 import Select from '@/components/ui/Select';
 import Spinner from '@/components/ui/Spinner';
 import ThemeToggle from '@/components/settings/ThemeToggle';
-import { HiOutlineCheck, HiOutlineXMark, HiOutlineKey } from 'react-icons/hi2';
+import { HiOutlineCheck, HiOutlineXMark, HiOutlineKey, HiOutlineBolt, HiOutlineShieldCheck } from 'react-icons/hi2';
 import { useToast } from '@/lib/contexts/ToastContext';
+import { useI18n } from '@/lib/contexts/I18nContext';
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<any>(null);
@@ -20,7 +21,7 @@ export default function SettingsPage() {
   const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [aiModel, setAiModel] = useState('');
   const [aiMaxTokens, setAiMaxTokens] = useState('');
-  const [unrestricted, setUnrestricted] = useState(false);
+  const [fullAccess, setFullAccess] = useState(false);
 
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -30,6 +31,7 @@ export default function SettingsPage() {
   const [passwordResult, setPasswordResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const { showToast } = useToast();
+  const { t, setLocale } = useI18n();
 
   useEffect(() => {
     fetch('/api/settings/config').then(r => r.json()).then(j => {
@@ -41,7 +43,7 @@ export default function SettingsPage() {
         setAiModel(j.data.aiModel || '');
         // Zero significa "usar o padrão do painel": mostra o campo vazio.
         setAiMaxTokens(j.data.aiMaxTokens ? String(j.data.aiMaxTokens) : '');
-        setUnrestricted(Boolean(j.data.aiUnrestrictedEnabled));
+        setFullAccess(Boolean(j.data.aiFullAccess));
       }
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);
@@ -57,31 +59,39 @@ export default function SettingsPage() {
     updates.aiBaseUrl = aiBaseUrl;
     if (aiModel) updates.aiModel = aiModel;
     updates.aiMaxTokens = aiMaxTokens.trim() === '' ? 0 : Number(aiMaxTokens);
-    updates.aiUnrestrictedEnabled = unrestricted;
-    await fetch('/api/settings/config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates),
-    });
+    updates.aiFullAccess = fullAccess;
+    try {
+      const res = await fetch('/api/settings/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error);
+      // O idioma vale já, sem recarregar a página.
+      if (language) setLocale(language);
+      showToast(t('settings.saveSuccess'), 'success');
+    } catch {
+      showToast(t('settings.saveError'), 'error');
+    }
     setSaving(false);
-    showToast('Configurações salvas', 'success');
   };
 
   const handleChangePassword = async () => {
     setPasswordResult(null);
 
     if (!currentPassword || !newPassword || !confirmPassword) {
-      setPasswordResult({ success: false, message: 'Todos os campos são obrigatórios' });
+      setPasswordResult({ success: false, message: t('settings.passwordAllRequired') });
       return;
     }
 
     if (newPassword.length < 8) {
-      setPasswordResult({ success: false, message: 'Nova senha deve ter no mínimo 8 caracteres' });
+      setPasswordResult({ success: false, message: t('settings.passwordTooShort') });
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      setPasswordResult({ success: false, message: 'As senhas não coincidem' });
+      setPasswordResult({ success: false, message: t('settings.passwordMismatch') });
       return;
     }
 
@@ -95,15 +105,15 @@ export default function SettingsPage() {
       const data = await resp.json();
 
       if (data.success) {
-        setPasswordResult({ success: true, message: 'Senha alterada com sucesso!' });
+        setPasswordResult({ success: true, message: t('settings.passwordSuccess') });
         setCurrentPassword('');
         setNewPassword('');
         setConfirmPassword('');
       } else {
-        setPasswordResult({ success: false, message: data.error || 'Erro ao alterar senha' });
+        setPasswordResult({ success: false, message: data.error || t('settings.passwordFailed') });
       }
     } catch {
-      setPasswordResult({ success: false, message: 'Erro de conexão' });
+      setPasswordResult({ success: false, message: t('settings.connectionError') });
     }
     setChangingPassword(false);
   };
@@ -111,7 +121,7 @@ export default function SettingsPage() {
   return (
     <AppLayout>
       <div className="space-y-6 max-w-2xl">
-        <h1 className="text-2xl font-bold text-[var(--text-primary)]">Configurações</h1>
+        <h1 className="text-2xl font-bold text-[var(--text-primary)]">{t('settings.title')}</h1>
 
         {loading ? (
           <div className="flex justify-center py-12"><Spinner size="lg" /></div>
@@ -119,21 +129,21 @@ export default function SettingsPage() {
           <>
             {/* Geral */}
             <Card>
-              <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Aparência e Idioma</h3>
+              <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t('settings.appearance')}</h3>
               <div className="space-y-4">
                 <Input
-                  label="Nome do Servidor"
+                  label={t('settings.serverName')}
                   value={serverName}
                   onChange={e => setServerName(e.target.value)}
                 />
                 <Select
-                  label="Idioma"
+                  label={t('settings.language')}
                   value={language}
                   onChange={e => setLanguage(e.target.value)}
                   options={[
-                    { value: 'pt-BR', label: 'Português (Brasil)' },
-                    { value: 'en-US', label: 'English (US)' },
-                    { value: 'es-ES', label: 'Español' },
+                    { value: 'pt-BR', label: t('settings.languagePt') },
+                    { value: 'en-US', label: t('settings.languageEn') },
+                    { value: 'es-ES', label: t('settings.languageEs') },
                   ]}
                 />
                 <ThemeToggle />
@@ -142,37 +152,37 @@ export default function SettingsPage() {
 
             {/* IA Integration */}
             <Card>
-              <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4">Integração IA</h3>
+              <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t('settings.integration')}</h3>
               <Input
-                label="Chave API (DeepSeek)"
+                label={t('settings.apiKey')}
                 type="password"
                 placeholder="sk-..."
                 value={apiKey}
                 onChange={e => setApiKey(e.target.value)}
               />
               <p className="text-xs text-[var(--text-muted)] mt-2">
-                Obtenha sua chave em{' '}
+                {t('settings.apiKeyHelp')}{' '}
                 <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
                   platform.deepseek.com
                 </a>
               </p>
 
               <Input
-                label="Endpoint (deixe vazio para DeepSeek)"
+                label={t('settings.aiEndpoint')}
                 placeholder="https://api.openai.com/v1"
                 value={aiBaseUrl}
                 onChange={e => setAiBaseUrl(e.target.value)}
                 className="mt-4"
               />
               <Input
-                label="Modelo"
+                label={t('settings.model')}
                 placeholder="deepseek-v4-pro"
                 value={aiModel}
                 onChange={e => setAiModel(e.target.value)}
                 className="mt-4"
               />
               <Input
-                label="Máximo de tokens por resposta (vazio usa o padrão)"
+                label={t('settings.maxTokens')}
                 type="number"
                 min={256}
                 max={65536}
@@ -181,71 +191,71 @@ export default function SettingsPage() {
                 onChange={e => setAiMaxTokens(e.target.value)}
                 className="mt-4"
               />
-              <p className="text-xs text-[var(--text-muted)] mt-2">
-                Teto da resposta do modelo em cada chamada. Vazio mantém o padrão do painel
-                (4096, ou 8192 no modo laboratório). Valores muito baixos cortam a escrita de
-                arquivos no meio; muito altos podem ser recusados pelo modelo.
-              </p>
+              <p className="text-xs text-[var(--text-muted)] mt-2">{t('settings.maxTokensHelp')}</p>
+              <p className="text-xs text-[var(--text-muted)] mt-2">{t('settings.compatHelp')}</p>
 
-              <p className="text-xs text-[var(--text-muted)] mt-2">
-                O cliente é compatível com a API da OpenAI — qualquer endpoint nesse formato serve.
-                O modelo precisa suportar <span className="font-mono">function calling</span>, senão a IA
-                não consegue executar ferramentas.
-              </p>
-
-              {/* Modo laboratório */}
-              <div className="mt-6 pt-4 border-t border-[var(--border-color)]">
+              {/* Acesso Total */}
+              <div className={`mt-6 rounded-xl border p-4 transition-colors ${
+                fullAccess ? 'border-amber-500/50 bg-amber-500/5' : 'border-[var(--border-color)]'
+              }`}>
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={unrestricted}
-                    onChange={e => setUnrestricted(e.target.checked)}
+                    checked={fullAccess}
+                    onChange={e => setFullAccess(e.target.checked)}
                     className="mt-1 rounded"
                   />
                   <span className="text-sm">
-                    <span className="font-medium text-red-400">Liberar o modo laboratório</span>
-                    <span className="block text-xs text-[var(--text-muted)] mt-1">
-                      Habilita um quarto modo no assistente em que ele executa qualquer comando,
-                      escreve em qualquer caminho e pode alterar o código do próprio painel —
-                      tudo sem pedir aprovação. As proteções que restam são mecânicas: registro de
-                      tudo no journal, snapshot antes de alterar o painel, e reversão automática se
-                      o painel não voltar depois de se reiniciar.
+                    <span className="flex items-center gap-1.5 font-semibold text-amber-400">
+                      <HiOutlineBolt className="w-4 h-4" />
+                      {t('settings.fullAccessLabel')}
                     </span>
-                    <span className="block text-xs text-red-400/80 mt-1">
-                      Use apenas em servidor dedicado a testes. Ligado isto, o painel deixa de ter
-                      contenção contra o que a IA decidir fazer.
+                    <span className="block text-xs text-[var(--text-secondary)] mt-1.5">
+                      {fullAccess ? t('settings.fullAccessDesc') : t('settings.fullAccessOff')}
                     </span>
                   </span>
                 </label>
+
+                <p className="flex items-start gap-2 text-xs text-[var(--text-muted)] mt-3">
+                  <HiOutlineShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />
+                  {t('settings.fullAccessRead')}
+                </p>
+
+                {fullAccess && (
+                  <div className="mt-3 space-y-1">
+                    <p className="text-xs text-[var(--text-muted)]">{t('settings.fullAccessSafeguards')}</p>
+                    <p className="text-xs text-amber-400/90">{t('settings.fullAccessWarning')}</p>
+                  </div>
+                )}
               </div>
             </Card>
 
             {/* Change Password */}
             <Card>
               <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4 flex items-center gap-2">
-                <HiOutlineKey className="w-5 h-5" /> Alterar Senha do Painel
+                <HiOutlineKey className="w-5 h-5" /> {t('settings.passwordTitle')}
               </h3>
               <div className="space-y-4">
                 <Input
-                  label="Senha Atual"
+                  label={t('settings.currentPassword')}
                   type="password"
                   value={currentPassword}
                   onChange={e => setCurrentPassword(e.target.value)}
-                  placeholder="Digite sua senha atual"
+                  placeholder={t('settings.passwordCurrentPlaceholder')}
                 />
                 <Input
-                  label="Nova Senha"
+                  label={t('settings.newPassword')}
                   type="password"
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}
-                  placeholder="Mínimo 8 caracteres"
+                  placeholder={t('settings.passwordNewPlaceholder')}
                 />
                 <Input
-                  label="Confirmar Nova Senha"
+                  label={t('settings.confirmNewPassword')}
                   type="password"
                   value={confirmPassword}
                   onChange={e => setConfirmPassword(e.target.value)}
-                  placeholder="Repita a nova senha"
+                  placeholder={t('settings.passwordConfirmPlaceholder')}
                 />
 
                 {passwordResult && (
@@ -269,13 +279,13 @@ export default function SettingsPage() {
                   variant="ghost"
                   className="w-full sm:w-auto"
                 >
-                  Alterar Senha
+                  {t('settings.changePassword')}
                 </Button>
               </div>
             </Card>
 
             <Button onClick={handleSave} loading={saving} className="w-full sm:w-auto">
-              Salvar Configurações
+              {t('settings.saveButton')}
             </Button>
           </>
         )}

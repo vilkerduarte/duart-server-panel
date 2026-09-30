@@ -31,8 +31,10 @@ import { readCertMetadata, listCertbotLineages, issueCertificate, getCertStatus,
 import { detectPhpVersions, installPhp, diagnosePhpSite, readSlowLog, poolSocketPath, preferredPhpVersion } from '../php';
 import { readApps, appStatus, appLogs, restartApp, reloadApp, detectPythonVersions } from '../python';
 import { assessCommandRisk, needsRollbackGuard, armRollback, disarmRollback } from './safety';
+import { validateReadonlyCommand, runPipeline, READONLY_BINARIES } from './readonly';
+import { tr, Locale } from './messages';
+import { AiMode, canWrite } from './modes';
 import { applySelfUpdate, listSnapshots, restoreSnapshot, snapshotPanel, projectRoot } from './selfupdate';
-import type { ApprovalMode } from './sessions';
 
 export type ToolRisk = 'read' | 'write' | 'irreversible';
 
@@ -47,12 +49,16 @@ export type ToolArgs = Record<string, any>;
 export interface ToolContext {
   user: string;
   sessionId: string;
-  mode: ApprovalMode;
+  mode: AiMode;
+  /** Acesso Total ligado na configuração. */
+  fullAccess?: boolean;
   /**
-   * Modo laboratório: sem jaula de caminho, sem aprovação, timeouts longos.
-   * Só é ligado quando o operador habilita explicitamente na configuração.
+   * Escrita sem jaula de caminho, sem aprovação e com timeouts longos.
+   * Vale só nos modos que escrevem (Executar e Gerar) e com o Acesso Total
+   * ligado. A leitura não depende disto: é sempre livre.
    */
   unrestricted?: boolean;
+  locale?: Locale;
 }
 
 export interface ToolResult {
@@ -76,7 +82,7 @@ export interface ToolDefinition {
   description: string;
   risk: ToolRisk;
   parameters: Record<string, unknown>;
-  preview?: (args: ToolArgs) => Promise<ToolPreview>;
+  preview?: (args: ToolArgs, locale: Locale) => Promise<ToolPreview>;
   execute: (args: ToolArgs, ctx: ToolContext) => Promise<ToolResult>;
 }
 
@@ -247,26 +253,42 @@ const readTools: ToolDefinition[] = [
 
   {
     name: 'list_directory',
-    description: 'Lista o conteúdo de um diretório permitido.',
+    description:
+      'Lista o conteúdo de qualquer diretório do servidor (sem restrição de caminho), com tamanho e data de modificação.',
     risk: 'read',
     parameters: {
       type: 'object',
-      properties: { path: { type: 'string' }, showHidden: { type: 'boolean' } },
+      properties: {
+        path: { type: 'string' },
+        showHidden: { type: 'boolean' },
+        limit: { type: 'number', description: 'Máximo de entradas. Padrão 300, até 2000' },
+      },
       required: ['path'],
       additionalProperties: false,
     },
-    async execute(args, ctx) {
+    async execute(args) {
       try {
-        const target = resolvePath(str(args.path), ctx);
-        const entries = fs.readdirSync(target, { withFileTypes: true })
-          .filter(e => args.showHidden || !e.name.startsWith('.'))
-          .slice(0, 500)
+        const target = resolveReadPath(str(args.path));
+        const limit = Math.min(Math.max(int(args.limit, 300), 1), 2000);
+        const all = fs.readdirSync(target, { withFileTypes: true })
+          .filter(e => args.showHidden || !e.name.startsWith('.'));
+
+        const entries = all
+          .slice(0, limit)
           .map(e => {
             let size = 0;
-            try { size = fs.statSync(path.join(target, e.name)).size; } catch {}
-            return { name: e.name, type: e.isDirectory() ? 'dir' : 'file', size };
-          });
-        return ok({ path: target, entries });
+            let modified = '';
+            try {
+              const st = fs.lstatSync(path.join(target, e.name));
+              size = st.size;
+              modified = st.mtime.toISOString();
+            } catch {}
+            const type = e.isDirectory() ? 'dir' : e.isSymbolicLink() ? 'link' : 'file';
+            return { name: e.name, type, size, modified };
+          })
+          .sort((x, y) => (x.type === 'dir' ? 0 : 1) - (y.type === 'dir' ? 0 : 1) || x.name.localeCompare(y.name));
+
+        return ok({ path: target, total: all.length, truncated: all.length > limit, entries });
       } catch (err) {
         return fail(errorMessage(err));
       }
@@ -275,37 +297,336 @@ const readTools: ToolDefinition[] = [
 
   {
     name: 'read_file',
-    description: 'Lê um arquivo de texto dentro dos diretórios permitidos.',
+    description:
+      'Lê qualquer arquivo de texto do servidor, sem restrição de caminho (configs, logs, código, /proc, /etc, /var…). ' +
+      'Para arquivos grandes use startLine/maxLines para paginar ou tail=true para ver o final.',
     risk: 'read',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string' },
-        maxLines: { type: 'number', description: 'Padrão 400' },
+        startLine: { type: 'number', description: 'Primeira linha (base 1). Padrão 1' },
+        maxLines: { type: 'number', description: 'Padrão 400, até 3000' },
+        tail: { type: 'boolean', description: 'Devolve as últimas maxLines linhas' },
       },
       required: ['path'],
       additionalProperties: false,
     },
-    async execute(args, ctx) {
+    async execute(args) {
       try {
-        const target = resolvePath(str(args.path), ctx);
+        const target = resolveReadPath(str(args.path));
         const stat = fs.statSync(target);
-        if (stat.isDirectory()) return fail('O caminho é um diretório');
-        if (stat.size > 5 * 1024 * 1024) return fail('Arquivo maior que 5MB');
+        if (stat.isDirectory()) return fail('O caminho é um diretório; use list_directory');
 
-        const maxLines = int(args.maxLines, 400);
-        const lines = fs.readFileSync(target, 'utf-8').split('\n');
-        const truncated = lines.length > maxLines;
+        const maxLines = Math.min(Math.max(int(args.maxLines, 400), 1), 3000);
+        const startLine = Math.max(int(args.startLine, 1), 1);
+
+        // Arquivos grandes não entram na memória do painel: tail e sed leem em fluxo.
+        if (stat.size > IN_MEMORY_LIMIT) {
+          const result = args.tail
+            ? await execFileSafe('tail', ['-n', String(maxLines), target], { timeout: 30000 })
+            : await execFileSafe('sed', ['-n', `${startLine},${startLine + maxLines - 1}p;${startLine + maxLines}q`, target], { timeout: 30000 });
+          if (result.code !== 0) return fail(result.stderr || 'Falha ao ler o arquivo');
+          return ok({ path: target, sizeBytes: stat.size, content: result.stdout, partial: true, startLine: args.tail ? undefined : startLine });
+        }
+
+        const buffer = fs.readFileSync(target);
+        if (buffer.subarray(0, 4096).includes(0)) {
+          const kind = await execFileSafe('file', ['-b', target], { timeout: 5000 });
+          return ok({ path: target, binary: true, sizeBytes: buffer.length, type: kind.stdout });
+        }
+
+        const lines = buffer.toString('utf-8').split('\n');
+        const from = args.tail ? Math.max(lines.length - maxLines, 0) : startLine - 1;
+        const slice = lines.slice(from, from + maxLines);
 
         return ok({
           path: target,
-          content: lines.slice(0, maxLines).join('\n'),
+          content: slice.join('\n'),
+          firstLine: from + 1,
+          lastLine: from + slice.length,
           totalLines: lines.length,
-          truncated,
+          truncated: from + slice.length < lines.length || from > 0,
         });
       } catch (err) {
         return fail(errorMessage(err));
       }
+    },
+  },
+
+  {
+    name: 'file_info',
+    description: 'Metadados de um arquivo ou diretório: tipo, tamanho, dono, permissões, datas e destino de symlink.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    async execute(args) {
+      try {
+        const target = resolveReadPath(str(args.path));
+        const st = fs.lstatSync(target);
+        const kind = await execFileSafe('file', ['-b', target], { timeout: 5000 });
+
+        return ok({
+          path: target,
+          type: st.isDirectory() ? 'dir' : st.isSymbolicLink() ? 'link' : 'file',
+          linkTarget: st.isSymbolicLink() ? fs.readlinkSync(target) : undefined,
+          sizeBytes: st.size,
+          mode: (st.mode & 0o7777).toString(8),
+          uid: st.uid,
+          gid: st.gid,
+          modified: st.mtime.toISOString(),
+          changed: st.ctime.toISOString(),
+          description: kind.stdout,
+        });
+      } catch (err) {
+        return fail(errorMessage(err));
+      }
+    },
+  },
+
+  {
+    name: 'find_files',
+    description:
+      'Procura arquivos e diretórios por nome, tipo, tamanho ou idade em qualquer parte do servidor. ' +
+      'Devolve tamanho, data e caminho. Ex.: logs com mais de 30 dias, arquivos acima de 100 MB.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Onde procurar' },
+        name: { type: 'string', description: 'Padrão de nome com curinga, ex.: "*.log" (não diferencia maiúsculas)' },
+        type: { type: 'string', enum: ['f', 'd', 'l'] },
+        minSizeMb: { type: 'number' },
+        olderThanDays: { type: 'number' },
+        newerThanDays: { type: 'number' },
+        maxDepth: { type: 'number' },
+        sameFilesystem: { type: 'boolean', description: 'Não atravessa outros pontos de montagem' },
+        limit: { type: 'number', description: 'Padrão 200, até 1000' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    async execute(args) {
+      try {
+        const root = resolveReadPath(str(args.path));
+        const limit = Math.min(Math.max(int(args.limit, 200), 1), 1000);
+
+        const findArgs: string[] = [root];
+        if (args.sameFilesystem) findArgs.push('-xdev');
+        if (args.maxDepth !== undefined) findArgs.push('-maxdepth', String(Math.max(int(args.maxDepth, 1), 0)));
+        if (['f', 'd', 'l'].includes(str(args.type))) findArgs.push('-type', str(args.type));
+        if (args.name) findArgs.push('-iname', str(args.name));
+        if (args.minSizeMb !== undefined) findArgs.push('-size', `+${Math.max(int(args.minSizeMb, 1), 0)}M`);
+        if (args.olderThanDays !== undefined) findArgs.push('-mtime', `+${Math.max(int(args.olderThanDays, 1), 0)}`);
+        if (args.newerThanDays !== undefined) findArgs.push('-mtime', `-${Math.max(int(args.newerThanDays, 1), 0)}`);
+        findArgs.push('-printf', '%s\t%TY-%Tm-%Td %TH:%TM\t%p\n');
+
+        const result = await execFileSafe('find', findArgs, { timeout: 120000 });
+        const rows = result.stdout.split('\n').filter(Boolean);
+
+        const matches = rows.slice(0, limit).map(row => {
+          const [size, modified, ...rest] = row.split('\t');
+          return { sizeBytes: Number(size), modified, path: rest.join('\t') };
+        });
+        const totalBytes = rows.reduce((sum, row) => sum + (Number(row.split('\t')[0]) || 0), 0);
+
+        return ok({
+          total: rows.length,
+          totalBytes,
+          truncated: rows.length > limit,
+          matches,
+          warnings: result.stderr ? result.stderr.split('\n').slice(0, 5) : undefined,
+        });
+      } catch (err) {
+        return fail(errorMessage(err));
+      }
+    },
+  },
+
+  {
+    name: 'disk_usage',
+    description:
+      'Uso de disco por diretório, do maior para o menor (equivale a du). Use para descobrir o que ocupa espaço. ' +
+      'Devolve também o df dos pontos de montagem.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Padrão "/"' },
+        depth: { type: 'number', description: 'Profundidade de 1 a 4. Padrão 1' },
+        limit: { type: 'number', description: 'Padrão 25, até 100' },
+        crossFilesystems: { type: 'boolean', description: 'Inclui outros pontos de montagem. Padrão false' },
+      },
+      additionalProperties: false,
+    },
+    async execute(args) {
+      try {
+        const root = resolveReadPath(str(args.path, '/'));
+        const depth = Math.min(Math.max(int(args.depth, 1), 1), 4);
+        const limit = Math.min(Math.max(int(args.limit, 25), 1), 100);
+
+        // -k e -d valem em GNU e BSD; o -B1 e o --max-depth só no GNU.
+        const duArgs = ['-k', '-d', String(depth)];
+        if (!args.crossFilesystems) duArgs.push('-x');
+        duArgs.push(root);
+
+        const [du, df] = await Promise.all([
+          execFileSafe('du', duArgs, { timeout: 180000 }),
+          executeCommand('disk_info'),
+        ]);
+
+        const entries = du.stdout.split('\n').filter(Boolean)
+          .map(line => {
+            const [kilobytes, ...rest] = line.split('\t');
+            return { path: rest.join('\t'), bytes: Number(kilobytes) * 1024 };
+          })
+          .filter(entry => entry.path && entry.path !== root && Number.isFinite(entry.bytes))
+          .sort((a, b) => b.bytes - a.bytes)
+          .slice(0, limit);
+
+        const total = du.stdout.split('\n').map(l => l.split('\t')).find(([, p]) => p === root);
+
+        return ok({
+          path: root,
+          totalBytes: total ? Number(total[0]) * 1024 : undefined,
+          entries,
+          filesystems: df.stdout.split('\n').slice(0, 20),
+          warnings: du.stderr ? du.stderr.split('\n').slice(0, 3) : undefined,
+        });
+      } catch (err) {
+        return fail(errorMessage(err));
+      }
+    },
+  },
+
+  {
+    name: 'search_code',
+    description:
+      'Busca um padrão (regex) no conteúdo dos arquivos de qualquer diretório. ' +
+      'Use para se localizar em projetos, configs e logs antes de editar ou concluir.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Expressão regular estendida' },
+        directory: { type: 'string' },
+        glob: { type: 'string', description: 'Filtro de nome, ex.: "*.ts"' },
+        ignoreCase: { type: 'boolean' },
+        maxResults: { type: 'number' },
+      },
+      required: ['pattern', 'directory'],
+      additionalProperties: false,
+    },
+    async execute(args) {
+      try {
+        const directory = resolveReadPath(str(args.directory));
+        const limit = Math.min(int(args.maxResults, 80), 400);
+
+        const grepArgs = [
+          args.ignoreCase ? '-rniE' : '-rnE', '-e', str(args.pattern), directory,
+          '--exclude-dir=node_modules', '--exclude-dir=.git', '--exclude-dir=.next',
+          '--exclude-dir=.venv', '--exclude-dir=__pycache__', '--exclude-dir=vendor',
+          '-I',
+        ];
+        if (args.glob) grepArgs.push(`--include=${str(args.glob)}`);
+
+        const result = await execFileSafe('grep', grepArgs, { timeout: 90000 });
+        const lines = result.stdout.split('\n').filter(Boolean);
+
+        return ok({ matches: lines.slice(0, limit), total: lines.length, truncated: lines.length > limit });
+      } catch (err) {
+        return fail(errorMessage(err));
+      }
+    },
+  },
+
+  {
+    name: 'run_readonly',
+    description:
+      'Consulta por linha de comando, somente leitura, em qualquer modo e sem aprovação. Aceita programas de consulta ' +
+      `(${READONLY_BINARIES.slice(0, 40).join(', ')}, …) ligados por "|". Sem shell: não há redirecionamento, ";", "&&", ` +
+      'substituição de comando nem expansão de curingas ou variáveis (use find_files para curingas). ' +
+      'Ex.: "docker ps -a", "docker inspect meu-container", "journalctl -u nginx -n 100 --no-pager", ' +
+      '"ss -tlnp", "ps aux --sort=-%mem | head -n 15", "curl -sI https://exemplo.com". ' +
+      'O que não for de leitura é recusado com o motivo.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        cwd: { type: 'string', description: 'Diretório de trabalho' },
+        timeoutSeconds: { type: 'number', description: 'Padrão 30, até 180' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+    async execute(args) {
+      const parsed = validateReadonlyCommand(str(args.command));
+      if (!parsed.ok) return fail(parsed.error);
+
+      let cwd: string | undefined;
+      if (args.cwd) {
+        try { cwd = resolveReadPath(str(args.cwd)); } catch (err) { return fail(errorMessage(err)); }
+      }
+
+      const timeout = Math.min(Math.max(int(args.timeoutSeconds, 30), 1), 180) * 1000;
+      const result = await runPipeline(parsed.stages, timeout, cwd);
+
+      return {
+        ok: result.code === 0 && !result.timedOut,
+        data: {
+          exitCode: result.code,
+          stdout: result.stdout.substring(0, 16000),
+          stderr: result.stderr.substring(0, 3000),
+          truncated: result.truncated || result.stdout.length > 16000,
+          timedOut: result.timedOut || undefined,
+        },
+        error: result.timedOut
+          ? `Tempo esgotado depois de ${timeout / 1000}s`
+          : result.code === 0 ? undefined : `Saiu com código ${result.code}: ${result.stderr.substring(0, 300)}`,
+      };
+    },
+  },
+
+  {
+    name: 'update_plan',
+    description:
+      'Registra ou atualiza o plano da tarefa e mostra ao usuário como uma lista de passos com estado. ' +
+      'Use em tarefas de três passos ou mais: uma vez no início e de novo nos marcos (não a cada chamada). ' +
+      'Não altera nada no servidor.',
+    risk: 'read',
+    parameters: {
+      type: 'object',
+      properties: {
+        steps: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'running', 'done', 'failed'] },
+            },
+            required: ['title', 'status'],
+          },
+        },
+      },
+      required: ['steps'],
+      additionalProperties: false,
+    },
+    async execute(args) {
+      const steps = (Array.isArray(args.steps) ? args.steps : [])
+        .slice(0, 20)
+        .map((step: { title?: unknown; status?: unknown }) => ({
+          title: str(step.title).slice(0, 160),
+          status: ['pending', 'running', 'done', 'failed'].includes(str(step.status)) ? str(step.status) : 'pending',
+        }))
+        .filter((step: { title: string }) => step.title);
+
+      return ok({ steps, recorded: steps.length });
     },
   },
 
@@ -491,7 +812,7 @@ const readTools: ToolDefinition[] = [
 const writeTools: ToolDefinition[] = [
   {
     name: 'write_file',
-    description: 'Grava conteúdo num arquivo dentro dos diretórios permitidos. Mostra o diff antes de aplicar.',
+    description: 'Grava conteúdo num arquivo (cria os diretórios que faltarem). Mostra o diff antes de aplicar. Sem Acesso Total só vale dentro dos diretórios permitidos.',
     risk: 'write',
     parameters: {
       type: 'object',
@@ -502,20 +823,22 @@ const writeTools: ToolDefinition[] = [
       required: ['path', 'content'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const target = path.resolve('/', str(args.path));
       const before = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
       const diff = unifiedDiff(before, str(args.content), { fromLabel: target, toLabel: `${target} (novo)` });
 
       return {
         type: 'diff',
-        content: diff.identical ? '(sem alterações)' : diff.text,
-        summary: `${fs.existsSync(target) ? 'Alterar' : 'Criar'} ${target} (${describeDiff(diff)})`,
+        content: diff.identical ? tr(locale, 'preview.noChanges') : diff.text,
+        summary: tr(locale, fs.existsSync(target) ? 'preview.changeFile' : 'preview.createFile', {
+          path: target, diff: describeDiff(diff),
+        }),
       };
     },
     async execute(args, ctx) {
       try {
-        const target = resolvePath(str(args.path), ctx);
+        const target = resolveWritePath(str(args.path), ctx);
         const content = str(args.content);
         const before = fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '';
 
@@ -556,16 +879,18 @@ const writeTools: ToolDefinition[] = [
       required: ['domain', 'type'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'text',
         content:
-          `Domínio: ${args.domain}\nTipo: ${args.type}\n` +
-          `Raiz: ${args.root ?? `/var/www/${args.domain}`}\n` +
-          (args.proxyPort ? `Porta do upstream: ${args.proxyPort}\n` : '') +
-          (args.type === 'php' ? `PHP: ${args.phpVersion ?? 'versão detectada'} · pool dedicado\n` : '') +
-          (args.aliases?.length ? `Aliases: ${args.aliases.join(', ')}\n` : ''),
-        summary: `Criar site ${args.domain} (${args.type})`,
+          `${tr(locale, 'preview.site.domain')}: ${args.domain}\n${tr(locale, 'preview.site.type')}: ${args.type}\n` +
+          `${tr(locale, 'preview.site.root')}: ${args.root ?? `/var/www/${args.domain}`}\n` +
+          (args.proxyPort ? `${tr(locale, 'preview.site.upstream')}: ${args.proxyPort}\n` : '') +
+          (args.type === 'php'
+            ? `${tr(locale, 'preview.site.php', { version: args.phpVersion ?? tr(locale, 'preview.site.phpDetected') })}\n`
+            : '') +
+          (args.aliases?.length ? `${tr(locale, 'preview.site.aliases')}: ${args.aliases.join(', ')}\n` : ''),
+        summary: tr(locale, 'preview.createSite', { domain: args.domain, type: args.type }),
       };
     },
     async execute(args) {
@@ -608,7 +933,7 @@ const writeTools: ToolDefinition[] = [
       required: ['domain', 'changes'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const site = getSiteByDomain(str(args.domain));
       if (!site) throw new Error(`Site não encontrado: ${args.domain}`);
 
@@ -618,8 +943,8 @@ const writeTools: ToolDefinition[] = [
 
       return {
         type: 'diff',
-        content: diff.identical ? '(sem alterações no arquivo)' : diff.text,
-        summary: `Atualizar ${site.domain} (${describeDiff(diff)})`,
+        content: diff.identical ? tr(locale, 'preview.noChangesFile') : diff.text,
+        summary: tr(locale, 'preview.updateSite', { domain: site.domain, diff: describeDiff(diff) }),
       };
     },
     async execute(args) {
@@ -648,12 +973,12 @@ const writeTools: ToolDefinition[] = [
       required: ['domain', 'enabled'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'text',
-        content: `${args.enabled ? 'Ativar' : 'Desativar'} manutenção em ${args.domain}` +
-          (args.bypassIps?.length ? `\nIPs liberados: ${args.bypassIps.join(', ')}` : ''),
-        summary: `Manutenção ${args.enabled ? 'ON' : 'OFF'} em ${args.domain}`,
+        content: tr(locale, args.enabled ? 'preview.maintenanceOn' : 'preview.maintenanceOff', { domain: args.domain }) +
+          (args.bypassIps?.length ? `\n${tr(locale, 'preview.bypassIps', { ips: args.bypassIps.join(', ') })}` : ''),
+        summary: tr(locale, 'preview.maintenance', { state: args.enabled ? 'ON' : 'OFF', domain: args.domain }),
       };
     },
     async execute(args) {
@@ -678,12 +1003,12 @@ const writeTools: ToolDefinition[] = [
       required: ['domain'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const site = getSiteByDomain(str(args.domain));
       return {
         type: 'text',
-        content: `${site?.enabled ? 'Desabilitar' : 'Habilitar'} o site ${args.domain}`,
-        summary: `${site?.enabled ? 'Desabilitar' : 'Habilitar'} ${args.domain}`,
+        content: tr(locale, site?.enabled ? 'preview.disableSiteLong' : 'preview.enableSiteLong', { domain: args.domain }),
+        summary: tr(locale, site?.enabled ? 'preview.disableSite' : 'preview.enableSite', { domain: args.domain }),
       };
     },
     async execute(args) {
@@ -711,11 +1036,11 @@ const writeTools: ToolDefinition[] = [
       required: ['unit', 'action'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'command',
         content: `systemctl ${args.action} ${args.unit}`,
-        summary: `${args.action} no serviço ${args.unit}`,
+        summary: tr(locale, 'preview.serviceAction', { action: args.action, unit: args.unit }),
       };
     },
     async execute(args) {
@@ -760,13 +1085,13 @@ const writeTools: ToolDefinition[] = [
       required: ['version'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const { packagesFor } = await import('../php');
       const packages = packagesFor(str(args.version), args.extensions);
       return {
         type: 'command',
         content: `apt-get install -y ${packages.join(' ')}`,
-        summary: `Instalar PHP ${args.version} (${packages.length} pacotes)`,
+        summary: tr(locale, 'preview.installPhp', { version: args.version, count: packages.length }),
       };
     },
     async execute(args) {
@@ -794,14 +1119,14 @@ const writeTools: ToolDefinition[] = [
       required: ['domains'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'command',
         content:
           `certbot certonly --webroot -w /var/www/acme \\\n` +
           (args.domains || []).map((d: string) => `  -d ${d}`).join(' \\\n') +
           (args.email ? ` \\\n  --email ${args.email}` : ''),
-        summary: `Emitir certificado para ${(args.domains || []).join(', ')}`,
+        summary: tr(locale, 'preview.issueCert', { domains: (args.domains || []).join(', ') }),
       };
     },
     async execute(args) {
@@ -842,11 +1167,11 @@ const writeTools: ToolDefinition[] = [
       required: ['name', 'action'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'command',
         content: `systemctl ${args.action === 'logs' ? 'status' : args.action} duart-${args.name}.service`,
-        summary: `${args.action} na aplicação ${args.name}`,
+        summary: tr(locale, 'preview.pythonApp', { action: args.action, name: args.name }),
       };
     },
     async execute(args) {
@@ -862,7 +1187,8 @@ const writeTools: ToolDefinition[] = [
   {
     name: 'run_command',
     description:
-      'Executa um comando de shell no servidor. Use quando nenhuma ferramenta específica servir. ' +
+      'Executa um comando de shell no servidor (pode alterar coisas). Para apenas consultar, use run_readonly, que não pede aprovação. ' +
+      'Use quando nenhuma ferramenta específica servir. ' +
       'Prefira sempre as ferramentas dedicadas: elas validam, revertem em caso de erro e produzem saída estruturada.',
     risk: 'write',
     parameters: {
@@ -871,25 +1197,25 @@ const writeTools: ToolDefinition[] = [
         command: { type: 'string' },
         reason: { type: 'string', description: 'Por que este comando é necessário' },
         cwd: { type: 'string', description: 'Diretório de trabalho' },
-        timeoutSeconds: { type: 'number', description: 'Padrão 60; até 1800 no modo laboratório' },
+        timeoutSeconds: { type: 'number', description: 'Padrão 60; até 600 (1800 com Acesso Total)' },
       },
       required: ['command', 'reason'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const risk = assessCommandRisk(str(args.command));
       return {
         type: 'command',
         content: str(args.command),
         summary: risk.irreversible
-          ? `⚠ Comando irreversível: ${risk.reasons.join('; ')}`
-          : str(args.reason, 'Executar comando'),
+          ? tr(locale, 'preview.irreversibleCommand', { reasons: risk.reasons.join('; ') })
+          : str(args.reason, tr(locale, 'preview.runCommand')),
       };
     },
     async execute(args, ctx) {
       const command = str(args.command);
       // Builds e `npm install` de projeto grande estouram 10 minutos com
-      // facilidade; no laboratório o teto sobe para 30.
+      // facilidade; com Acesso Total o teto sobe para 30.
       const maxSeconds = ctx?.unrestricted ? 1800 : 600;
       const timeout = Math.min(int(args.timeoutSeconds, 60), maxSeconds) * 1000;
       const cwd = args.cwd ? path.resolve('/', str(args.cwd)) : undefined;
@@ -933,11 +1259,11 @@ const writeTools: ToolDefinition[] = [
       required: ['token'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'text',
-        content: `Cancelar a reversão automática agendada (token ${args.token}).`,
-        summary: 'Confirmar acesso e cancelar reversão',
+        content: tr(locale, 'preview.confirmAccessBody', { token: args.token }),
+        summary: tr(locale, 'preview.confirmAccess'),
       };
     },
     async execute(args) {
@@ -954,7 +1280,7 @@ const writeTools: ToolDefinition[] = [
 const irreversibleTools: ToolDefinition[] = [
   {
     name: 'delete_file',
-    description: 'Remove um arquivo dentro dos diretórios permitidos.',
+    description: 'Remove um arquivo (com Acesso Total, também diretórios). Sem Acesso Total só vale dentro dos diretórios permitidos.',
     risk: 'irreversible',
     parameters: {
       type: 'object',
@@ -962,19 +1288,19 @@ const irreversibleTools: ToolDefinition[] = [
       required: ['path'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const target = path.resolve('/', str(args.path));
       let size = 0;
       try { size = fs.statSync(target).size; } catch {}
       return {
         type: 'text',
-        content: `Remover ${target} (${size} bytes). Esta operação não tem desfazer.`,
-        summary: `Apagar ${target}`,
+        content: tr(locale, 'preview.deleteFileBody', { path: target, size }),
+        summary: tr(locale, 'preview.deleteFile', { path: target }),
       };
     },
     async execute(args, ctx) {
       try {
-        const target = resolvePath(str(args.path), ctx);
+        const target = resolveWritePath(str(args.path), ctx);
         const stat = fs.statSync(target);
         if (stat.isDirectory() && !ctx?.unrestricted) {
           return fail('Use run_command para remover diretórios, com confirmação explícita.');
@@ -997,14 +1323,16 @@ const irreversibleTools: ToolDefinition[] = [
       required: ['domain'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const site = getSiteByDomain(str(args.domain));
       return {
         type: 'text',
         content: site
-          ? `Remover o vhost ${site.configPath}, o symlink e o pool PHP de ${site.domain}.\nOs arquivos em ${site.root ?? '(sem root)'} são preservados.`
-          : `Site ${args.domain} não encontrado.`,
-        summary: `Remover site ${args.domain}`,
+          ? tr(locale, 'preview.removeSiteBody', {
+              config: site.configPath, domain: site.domain, root: site.root ?? tr(locale, 'preview.noRoot'),
+            })
+          : tr(locale, 'preview.siteNotFound', { domain: args.domain }),
+        summary: tr(locale, 'preview.removeSite', { domain: args.domain }),
       };
     },
     async execute(args) {
@@ -1034,11 +1362,11 @@ const irreversibleTools: ToolDefinition[] = [
       required: ['action', 'rule'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'command',
         content: `ufw ${args.action} ${args.rule}`,
-        summary: `Firewall: ${args.action} ${args.rule} (reversão automática em 5 min)`,
+        summary: tr(locale, 'preview.firewall', { action: args.action, rule: args.rule }),
       };
     },
     async execute(args) {
@@ -1062,19 +1390,14 @@ const irreversibleTools: ToolDefinition[] = [
 ];
 
 /* ------------------------------------------------------------------ */
-/*  Ferramentas de laboratório (modo irrestrito)                       */
+/*  Ferramentas de arquivo em lote (Gerar e Executar)                  */
 /* ------------------------------------------------------------------ */
 
 /**
- * Só entram no catálogo quando o modo laboratório está ligado.
- *
- * São as ferramentas que tornam viável construir um projeto inteiro numa
- * sessão: escrita em lote, aplicação de patch, busca em código e alteração do
- * próprio painel. Fora do laboratório elas nem são oferecidas ao modelo — não
- * por serem proibidas, mas porque sem a jaula desligada produziriam apenas
- * chamadas que falhariam na validação de caminho.
+ * Montar a estrutura de um projeto em uma chamada em vez de uma por arquivo.
+ * Sem Acesso Total, as duas passam pela jaula de caminho e pedem aprovação.
  */
-const labTools: ToolDefinition[] = [
+const fileTools: ToolDefinition[] = [
   {
     name: 'write_files',
     description:
@@ -1101,17 +1424,17 @@ const labTools: ToolDefinition[] = [
       required: ['files'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       const files = Array.isArray(args.files) ? args.files : [];
       const lines = files.map((file: { path: string; content?: string }) => {
         const exists = fs.existsSync(path.resolve('/', String(file.path)));
         const bytes = Buffer.byteLength(String(file.content ?? ''));
-        return `${exists ? 'altera' : ' cria '}  ${file.path}  (${bytes} bytes)`;
+        return `${tr(locale, exists ? 'preview.fileEdit' : 'preview.fileCreate')}  ${file.path}  (${bytes} bytes)`;
       });
       return {
         type: 'text',
-        content: lines.join('\n') || '(nenhum arquivo)',
-        summary: `Gravar ${files.length} arquivo(s)`,
+        content: lines.join('\n') || tr(locale, 'preview.noFiles'),
+        summary: tr(locale, 'preview.writeFiles', { count: files.length }),
       };
     },
     async execute(args, ctx) {
@@ -1123,7 +1446,7 @@ const labTools: ToolDefinition[] = [
 
       for (const file of files) {
         try {
-          const target = resolvePath(String(file.path), ctx);
+          const target = resolveWritePath(String(file.path), ctx);
           const content = String(file.content ?? '');
           fs.mkdirSync(path.dirname(target), { recursive: true });
           fs.writeFileSync(target, content, 'utf-8');
@@ -1161,18 +1484,18 @@ const labTools: ToolDefinition[] = [
       required: ['patch'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'diff',
         content: str(args.patch).slice(0, 20000),
-        summary: `Aplicar patch em ${args.cwd ?? 'diretório do painel'}`,
+        summary: tr(locale, 'preview.applyPatch', { dir: args.cwd ?? tr(locale, 'preview.panelDir') }),
       };
     },
     async execute(args, ctx) {
       const patch = str(args.patch);
       if (!patch.trim()) return fail('Patch vazio');
 
-      const cwd = args.cwd ? resolvePath(str(args.cwd), ctx) : projectRoot();
+      const cwd = args.cwd ? resolveWritePath(str(args.cwd), ctx) : projectRoot();
       const strip = String(int(args.strip, 1));
 
       // git apply dá mensagem de erro muito melhor; patch(1) é o plano B para
@@ -1200,46 +1523,21 @@ const labTools: ToolDefinition[] = [
       );
     },
   },
+];
 
-  {
-    name: 'search_code',
-    description: 'Busca um padrão nos arquivos de um diretório. Use para se localizar num projeto antes de editar.',
-    risk: 'read',
-    parameters: {
-      type: 'object',
-      properties: {
-        pattern: { type: 'string', description: 'Expressão regular estendida' },
-        directory: { type: 'string' },
-        glob: { type: 'string', description: 'Filtro de nome, ex.: "*.ts"' },
-        maxResults: { type: 'number' },
-      },
-      required: ['pattern', 'directory'],
-      additionalProperties: false,
-    },
-    async execute(args, ctx) {
-      const directory = resolvePath(str(args.directory), ctx);
-      const limit = Math.min(int(args.maxResults, 80), 400);
+/* ------------------------------------------------------------------ */
+/*  Ferramentas do Acesso Total (só no modo Executar)                  */
+/* ------------------------------------------------------------------ */
 
-      const grepArgs = [
-        '-rnE', str(args.pattern), directory,
-        '--exclude-dir=node_modules', '--exclude-dir=.git', '--exclude-dir=.next',
-        '--exclude-dir=.venv', '--exclude-dir=__pycache__', '--exclude-dir=vendor',
-        '-I',
-      ];
-      if (args.glob) grepArgs.push(`--include=${str(args.glob)}`);
-
-      const result = await execFileSafe('grep', grepArgs, { timeout: 60000 });
-      const lines = result.stdout.split('\n').filter(Boolean);
-
-      return ok({ matches: lines.slice(0, limit), total: lines.length, truncated: lines.length > limit });
-    },
-  },
-
+/**
+ * Instalação de pacotes e alteração do próprio painel. Só entram no catálogo
+ * do modo Executar com o Acesso Total ligado — sem ele ficam fora do que o
+ * modelo enxerga, em vez de existirem só para serem recusadas.
+ */
+const fullAccessTools: ToolDefinition[] = [
   {
     name: 'install_packages',
-    description:
-      'Instala pacotes do sistema via apt. No modo laboratório qualquer pacote é aceito; ' +
-      'fora dele vale apenas a lista que o painel suporta.',
+    description: 'Instala pacotes do sistema via apt (qualquer pacote do repositório).',
     risk: 'write',
     parameters: {
       type: 'object',
@@ -1250,11 +1548,11 @@ const labTools: ToolDefinition[] = [
       required: ['packages'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'command',
         content: `apt-get install -y ${(args.packages ?? []).join(' ')}`,
-        summary: `Instalar ${(args.packages ?? []).length} pacote(s)`,
+        summary: tr(locale, 'preview.installPackages', { count: (args.packages ?? []).length }),
       };
     },
     async execute(args) {
@@ -1296,14 +1594,11 @@ const labTools: ToolDefinition[] = [
       required: ['summary'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'text',
-        content:
-          `Alteração no código do painel: ${args.summary}\n\n` +
-          'Sequência: snapshot → tsc --noEmit → next build → reinício agendado → verificação em 25s.\n' +
-          'Se o painel não responder depois do reinício, o snapshot é restaurado automaticamente.',
-        summary: `Auto-atualizar o painel: ${args.summary}`,
+        content: tr(locale, 'preview.selfUpdateBody', { summary: args.summary }),
+        summary: tr(locale, 'preview.selfUpdate', { summary: args.summary }),
       };
     },
     async execute(args) {
@@ -1341,13 +1636,13 @@ const labTools: ToolDefinition[] = [
       required: ['action'],
       additionalProperties: false,
     },
-    async preview(args) {
+    async preview(args, locale) {
       return {
         type: 'text',
         content: args.action === 'restore'
-          ? `Restaurar o código do painel a partir de ${args.file} e recompilar.`
-          : `Ação "${args.action}" sobre os snapshots do painel.`,
-        summary: `Snapshots do painel: ${args.action}`,
+          ? tr(locale, 'preview.snapshotsRestore', { file: args.file })
+          : tr(locale, 'preview.snapshotsAction', { action: args.action }),
+        summary: tr(locale, 'preview.snapshots', { action: args.action }),
       };
     },
     async execute(args) {
@@ -1379,15 +1674,34 @@ const labTools: ToolDefinition[] = [
 /*  Registro                                                           */
 /* ------------------------------------------------------------------ */
 
-export const ALL_TOOLS: ToolDefinition[] = [...readTools, ...writeTools, ...irreversibleTools, ...labTools];
+const writeFileTool = writeTools.find(t => t.name === 'write_file')!;
+
+export const ALL_TOOLS: ToolDefinition[] = [
+  ...readTools, ...writeTools, ...irreversibleTools, ...fileTools, ...fullAccessTools,
+];
 
 export const TOOL_MAP = new Map(ALL_TOOLS.map(t => [t.name, t]));
 
-/** Ferramentas expostas ao modelo em cada modo de aprovação. */
-export function toolsForMode(mode: ApprovalMode): ToolDefinition[] {
-  if (mode === 'read') return readTools;
-  if (mode === 'full') return ALL_TOOLS;
-  return [...readTools, ...writeTools, ...irreversibleTools];
+/**
+ * Ferramentas expostas ao modelo em cada modo.
+ *
+ * - Conversa, Analisar e Aprender: só leitura. A consulta é irrestrita — qualquer
+ *   arquivo, qualquer log, qualquer comando de consulta.
+ * - Gerar: leitura mais escrita de arquivos.
+ * - Executar: tudo, e com o Acesso Total ligado também instalação de pacotes e
+ *   alteração do painel.
+ */
+export function toolsForMode(mode: AiMode, fullAccess = false): ToolDefinition[] {
+  switch (mode) {
+    case 'generate':
+      return [...readTools, writeFileTool, ...fileTools];
+    case 'execute':
+      return fullAccess
+        ? ALL_TOOLS
+        : [...readTools, ...writeTools, ...irreversibleTools, ...fileTools];
+    default:
+      return readTools;
+  }
 }
 
 /** Formato de function calling da API OpenAI, que o DeepSeek também aceita. */
@@ -1402,61 +1716,91 @@ export function toOpenAiTools(tools: ToolDefinition[]) {
   }));
 }
 
+export interface AccessPolicy {
+  mode: AiMode;
+  fullAccess: boolean;
+}
+
+/** O Acesso Total só solta a escrita nos modos que escrevem. */
+export function isUnrestricted({ mode, fullAccess }: AccessPolicy): boolean {
+  return fullAccess && canWrite(mode);
+}
+
 /**
  * Decide se uma chamada precisa parar para aprovação.
  *
- * Leitura nunca para. Escrita para no modo assistido. O irreversível para em
- * qualquer modo — é o único ponto em que o modo autônomo ainda pede confirmação,
- * e é de propósito.
+ * Leitura nunca para, em nenhum modo. Toda escrita para — inclusive o
+ * irreversível — a menos que o Acesso Total esteja ligado num modo que escreve.
+ * Sem Acesso Total não existe execução automática: quem quer isso liga o
+ * interruptor de propósito.
  */
-export function requiresApproval(tool: ToolDefinition, args: ToolArgs, mode: ApprovalMode): boolean {
+export function requiresApproval(tool: ToolDefinition, args: ToolArgs, policy: AccessPolicy): boolean {
+  void args;
   if (tool.risk === 'read') return false;
-  if (mode === 'read') return true;
-
-  // Laboratório não tem portão nenhum — é o propósito declarado do modo. O que
-  // resta é proteção mecânica: journal de tudo, snapshot antes de mexer no
-  // painel, rollback do nginx, reversão agendada de firewall e SSH.
-  if (mode === 'full') return false;
-
-  if (tool.risk === 'irreversible') return true;
-
-  if (tool.name === 'run_command' && assessCommandRisk(str(args.command)).irreversible) {
-    return true;
-  }
-
-  return mode === 'assisted';
+  if (isUnrestricted(policy)) return false;
+  return true;
 }
 
-export async function buildPreview(tool: ToolDefinition, args: ToolArgs): Promise<ToolPreview> {
+export async function buildPreview(tool: ToolDefinition, args: ToolArgs, locale: Locale = 'pt-BR'): Promise<ToolPreview> {
   if (tool.preview) {
     try {
-      return await tool.preview(args);
+      return await tool.preview(args, locale);
     } catch (err) {
-      return { type: 'text', content: errorMessage(err), summary: `${tool.name} (pré-visualização indisponível)` };
+      return {
+        type: 'text',
+        content: errorMessage(err),
+        summary: tr(locale, 'preview.unavailable', { tool: tool.name }),
+      };
     }
   }
   return {
     type: 'text',
     content: JSON.stringify(args, null, 2),
-    summary: `Executar ${tool.name}`,
+    summary: tr(locale, 'preview.run', { tool: tool.name }),
   };
+}
+
+/**
+ * Trecho curto e independente de idioma que identifica o que a chamada faz
+ * (comando, caminho, domínio…) — é o que a interface mostra na linha de cada passo.
+ */
+export function describeCall(tool: ToolDefinition, args: ToolArgs): string {
+  const candidates = ['command', 'path', 'directory', 'domain', 'unit', 'name', 'source', 'pattern', 'rule', 'action'];
+  for (const key of candidates) {
+    const value = args?.[key];
+    if (typeof value === 'string' && value) {
+      const extra = key === 'action' && typeof args.unit === 'string' ? ` ${args.unit}` : '';
+      return `${value}${extra}`.replace(/\s+/g, ' ').slice(0, 200);
+    }
+  }
+  if (Array.isArray(args?.files)) return `${args.files.length} file(s)`;
+  if (Array.isArray(args?.packages)) return args.packages.join(' ').slice(0, 200);
+  if (Array.isArray(args?.steps)) return `${args.steps.length}`;
+  return tool.name;
 }
 
 /* ------------------------------------------------------------------ */
 /*  Utilitários                                                        */
 /* ------------------------------------------------------------------ */
 
+/** Acima disto o arquivo é lido em fluxo por tail/sed, não carregado na memória. */
+const IN_MEMORY_LIMIT = 8 * 1024 * 1024;
+
 /**
- * Resolve caminho respeitando (ou não) a jaula.
- * No modo laboratório a jaula sai do caminho: o objetivo declarado é montar
- * projetos e editar o próprio painel, o que exige escrever em qualquer lugar.
+ * Caminho para consulta: nunca há jaula. A IA pode olhar qualquer arquivo do
+ * servidor em qualquer modo — o que se restringe é escrever, não ler.
  */
-function resolvePath(input: string, ctx?: ToolContext): string {
-  if (ctx?.unrestricted) {
-    const resolved = path.resolve('/', input);
-    if (!resolved || resolved.includes('\0')) throw new Error('Caminho inválido');
-    return resolved;
-  }
+function resolveReadPath(input: string): string {
+  if (!input || input.includes('\0')) throw new Error('Caminho inválido');
+  return path.resolve('/', input);
+}
+
+/**
+ * Caminho para escrita. Com Acesso Total não há jaula; sem ele, vale a mesma
+ * lista de raízes e negações do gerenciador de arquivos.
+ */
+function resolveWritePath(input: string, ctx?: ToolContext): string {
+  if (ctx?.unrestricted) return resolveReadPath(input);
   return resolveSafePath(input, { allowedRoots: allowedRoots() });
 }
 

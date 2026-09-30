@@ -1,3 +1,4 @@
+import { NAMESPACES, loadNamespace } from '@/languages';
 import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react';
 
 interface I18nContextValue {
@@ -76,30 +77,39 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       .catch(() => {});
   }, []);
 
-  // Pre-load translations
+  // Bumped when a bundle finishes loading so `t` gets a new identity and every
+  // consumer re-renders with real text instead of the raw keys.
+  const [version, setVersion] = useState(0);
+
+  // Pre-load translations for the active locale and for pt-BR, which is the
+  // fallback for any key a locale does not define yet.
   useEffect(() => {
-    const namespaces = ['common', 'auth', 'dashboard', 'monitor', 'files', 'tasks',
-      'nginx', 'firewall', 'docker', 'databases', 'security', 'settings', 'ai',
-      'ssl', 'cron', 'backup', 'logs', 'network'];
+    document.documentElement.lang = locale;
 
-    if (!(window as any).__translations) {
-      (window as any).__translations = {};
-    }
-    if (!(window as any).__translations[locale]) {
-      (window as any).__translations[locale] = {};
-    }
+    const w = window as any;
+    if (!w.__translations) w.__translations = {};
 
-    // Load all namespaces for current locale
+    const locales = Array.from(new Set([locale, 'pt-BR']));
+    let cancelled = false;
+
     Promise.all(
-      namespaces.map(ns =>
-        import(`@/languages/${locale}/${ns}.js`)
-          .then(mod => {
-            (window as any).__translations[locale][ns] = mod.default || mod;
-            delete translationCache[`${locale}:${ns}`]; // clear cache
-          })
-          .catch(() => {})
-      )
-    );
+      locales.flatMap(loc => {
+        if (!w.__translations[loc]) w.__translations[loc] = {};
+        return NAMESPACES.map(ns =>
+          loadNamespace(loc, ns)
+            .then(bundle => {
+              if (!bundle) return;
+              w.__translations[loc][ns] = bundle;
+              delete translationCache[`${loc}:${ns}`];
+            })
+            .catch(err => console.warn(`[i18n] could not load ${loc}/${ns}`, err)),
+        );
+      }),
+    ).then(() => {
+      if (!cancelled) setVersion(v => v + 1);
+    });
+
+    return () => { cancelled = true; };
   }, [locale]);
 
   const setLocale = useCallback((newLocale: string) => {
@@ -122,7 +132,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     }
 
     return text;
-  }, [locale]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locale, version]);
 
   return (
     <I18nContext.Provider value={{ t, locale, setLocale, availableLocales }}>

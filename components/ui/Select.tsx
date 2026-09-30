@@ -21,7 +21,7 @@ const Select = forwardRef<HTMLSelectElement, SelectProps>(
         )}
         <select
           ref={ref}
-          className={`px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-sm text-[var(--text-primary)] transition-theme focus:outline-none focus:ring-2 focus:ring-[var(--accent)] ${className}`}
+          className={`px-3 py-2 rounded-xl bg-[var(--input-bg)] border border-[var(--input-border)] text-sm text-[var(--text-primary)] transition-theme focus:outline-none focus:ring-2 focus:ring-[var(--accent)] ${className}`}
           {...props}
         >
           {options.map(opt => (
