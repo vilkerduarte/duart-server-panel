@@ -1,5 +1,6 @@
 import "@/styles/globals.css";
 import type { AppProps } from "next/app";
+import Head from "next/head";
 import { useEffect, useState } from "react";
 import { ThemeProvider } from "@/lib/contexts/ThemeContext";
 import { I18nProvider } from "@/lib/contexts/I18nContext";
@@ -49,6 +50,12 @@ function AppContent({ Component, pageProps }: AppProps) {
 export default function App(props: AppProps) {
   return (
     <ThemeProvider>
+      <Head>
+        <title>Duart Panel</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="icon" href="/logo.svg" type="image/svg+xml" />
+        <link rel="apple-touch-icon" href="/logo-180.png" />
+      </Head>
       <I18nProvider>
         <AuthProvider>
           <ToastProvider>
