@@ -473,7 +473,7 @@ export default function AiModal({ open, onClose }: AiModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={t('ai.title')}>
-      <div className="fixed inset-0 bg-[#02050f]/70 backdrop-blur-md" onClick={onClose} />
+      <div className="fixed inset-0 bg-[#02050f]/85" onClick={onClose} />
 
       <div className="glow-border relative flex h-[90vh] w-full max-w-6xl animate-fade-in flex-col overflow-hidden rounded-3xl bg-[var(--panel-bg)] shadow-[0_30px_120px_rgba(2,8,30,0.7)]">
         {/* Brilho decorativo no canto, como nas referências */}

@@ -46,9 +46,8 @@ export default function Header({ sidebarCollapsed, marginLeft, onOpenMenu }: Hea
       style={{
         left: marginLeft ?? (sidebarCollapsed ? '4rem' : '15rem'),
         // O conteúdo rola por baixo do cabeçalho; sem fundo o texto aparece através dele.
-        background: 'color-mix(in srgb, var(--bg-primary) 82%, transparent)',
-        backdropFilter: 'blur(12px)',
-        WebkitBackdropFilter: 'blur(12px)',
+        // Sem backdrop-filter: borrar o que está atrás custa caro a cada rolagem.
+        background: 'color-mix(in srgb, var(--bg-primary) 94%, transparent)',
       }}
     >
       <div className="flex items-center gap-2 text-sm min-w-0">

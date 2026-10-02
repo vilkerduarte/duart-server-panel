@@ -76,7 +76,7 @@ export default function Sidebar({ collapsed, onToggle, isMobile = false, mobileO
   return (
     <>
       {isMobile && mobileOpen && (
-        <div className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm" onClick={onMobileClose} aria-hidden="true" />
+        <div className="fixed inset-0 z-30 bg-black/70" onClick={onMobileClose} aria-hidden="true" />
       )}
       <aside
         aria-label={t('common.nav.main')}
