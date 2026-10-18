@@ -13,6 +13,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { executeCommand } from './system';
 import { writeFileAtomic, ensureDir, withFileLock } from './fsx';
 import {
@@ -30,6 +31,7 @@ import {
   generateGzipSnippet,
   generateProxySnippet,
   generateRateLimitConf,
+  supportsHttp2Directive,
 } from './nginx';
 
 export const NGINX_AVAILABLE = '/etc/nginx/sites-available';
@@ -37,6 +39,28 @@ export const NGINX_ENABLED = '/etc/nginx/sites-enabled';
 
 /** Um único lock para todas as operações de NGINX: a validação é global. */
 const NGINX_LOCK = '__nginx__';
+
+let http2DirectiveCache: boolean | null = null;
+
+/**
+ * Se o NGINX instalado aceita `http2 on;` (>= 1.25.1). Quando a versão não
+ * pode ser lida, cai na sintaxe `listen ... ssl http2`: nas versões novas ela
+ * só gera um aviso de depreciação, enquanto a outra quebra as antigas.
+ */
+export function nginxSupportsHttp2Directive(): boolean {
+  if (http2DirectiveCache !== null) return http2DirectiveCache;
+  for (const bin of ['nginx', '/usr/sbin/nginx']) {
+    // `nginx -v` escreve a versão no stderr.
+    const result = spawnSync(bin, ['-v'], { encoding: 'utf8', timeout: 5000 });
+    const output = `${result.stderr ?? ''}${result.stdout ?? ''}`;
+    if (/nginx\/\d/.test(output)) {
+      http2DirectiveCache = supportsHttp2Directive(output);
+      return http2DirectiveCache;
+    }
+  }
+  http2DirectiveCache = false;
+  return false;
+}
 
 export class NginxConfigError extends Error {
   readonly detail: string;

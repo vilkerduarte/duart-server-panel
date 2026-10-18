@@ -34,6 +34,7 @@ import {
   NGINX_ENABLED,
   NginxConfigError,
   FileMutation,
+  nginxSupportsHttp2Directive,
 } from './nginx-ops';
 import { readJson, writeJson, ensureDir, withFileLock } from './fsx';
 import { applyPool, removePool, ensurePoolUser, preferredPhpVersion, phpSizeFromNginx, POOL_PRESETS } from './php';
@@ -164,7 +165,7 @@ export function toNginxConfig(site: ManagedSite): NginxSiteConfig {
 }
 
 export function renderSiteConfig(site: ManagedSite): string {
-  return generateSiteConfig(toNginxConfig(site));
+  return generateSiteConfig({ ...toNginxConfig(site), http2Directive: nginxSupportsHttp2Directive() });
 }
 
 /* ------------------------------------------------------------------ */

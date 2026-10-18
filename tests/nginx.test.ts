@@ -5,6 +5,7 @@ import {
   splitServerBlocks,
   validateCustomDirectives,
   isValidDomain,
+  supportsHttp2Directive,
   MAINTENANCE_DIR,
   NginxSiteConfig,
 } from '../lib/nginx';
@@ -44,6 +45,28 @@ describe('generateSiteConfig — escuta', () => {
     expect(config).toContain('http2 on;');
     // `listen 443 ssl http2` é depreciado desde o NGINX 1.25.
     expect(config).not.toMatch(/listen\s+443\s+ssl\s+http2/);
+  });
+
+  it('usa http2 no listen em NGINX anterior a 1.25.1', () => {
+    const config = generateSiteConfig({
+      ...base,
+      ssl: true,
+      sslCertPath: '/etc/letsencrypt/live/exemplo.com/fullchain.pem',
+      sslKeyPath: '/etc/letsencrypt/live/exemplo.com/privkey.pem',
+      http2Directive: false,
+    });
+    expect(config).toContain('listen 443 ssl http2;');
+    expect(config).toContain('listen [::]:443 ssl http2;');
+    expect(config).not.toContain('http2 on;');
+  });
+
+  it('detecta a partir de qual versão `http2 on;` é aceito', () => {
+    expect(supportsHttp2Directive('nginx version: nginx/1.18.0 (Ubuntu)')).toBe(false);
+    expect(supportsHttp2Directive('nginx version: nginx/1.24.0 (Ubuntu)')).toBe(false);
+    expect(supportsHttp2Directive('nginx version: nginx/1.25.0')).toBe(false);
+    expect(supportsHttp2Directive('nginx version: nginx/1.25.1')).toBe(true);
+    expect(supportsHttp2Directive('nginx version: nginx/1.27.4')).toBe(true);
+    expect(supportsHttp2Directive('lixo')).toBe(false);
   });
 });
 

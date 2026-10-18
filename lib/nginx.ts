@@ -68,6 +68,12 @@ export interface NginxSiteConfig {
   /** IPs que continuam enxergando o site normalmente durante a manutenção. */
   maintenanceBypassIps?: string[];
   cacheStaticDuration?: string;
+  /**
+   * `http2 on;` só existe a partir do NGINX 1.25.1. Em versões anteriores
+   * (Ubuntu 22.04/24.04, Debian 12) ela é "unknown directive" e derruba o
+   * `nginx -t`; ali o HTTP/2 vai como parâmetro do `listen`. Padrão: true.
+   */
+  http2Directive?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -295,14 +301,25 @@ function serverNames(config: NginxSiteConfig): string {
   return [config.domain, ...(config.aliases || [])].filter(Boolean).join(' ');
 }
 
+/** O NGINX aceita a diretiva `http2 on;` a partir da 1.25.1. */
+export function supportsHttp2Directive(version: string): boolean {
+  const m = version.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return false;
+  const [major, minor, patch] = m.slice(1).map(Number);
+  if (major !== 1) return major > 1;
+  if (minor !== 25) return minor > 25;
+  return patch >= 1;
+}
+
 function listenDirectives(config: NginxSiteConfig, ssl: boolean): string {
   const port = ssl ? 443 : (config.listenPort || 80);
-  const suffix = ssl ? ' ssl' : '';
+  const http2Directive = config.http2Directive !== false;
+  const suffix = ssl ? (http2Directive ? ' ssl' : ' ssl http2') : '';
   const lines = [`    listen ${port}${suffix};`];
   if (config.ipv6 !== false) {
     lines.push(`    listen [::]:${port}${suffix};`);
   }
-  if (ssl) lines.push('    http2 on;');
+  if (ssl && http2Directive) lines.push('    http2 on;');
   return lines.join('\n');
 }
 

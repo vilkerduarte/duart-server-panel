@@ -166,11 +166,21 @@ NGINX_BACKUP_DIR="$DATA_DIR/backups/nginx"
 mkdir -p "$NGINX_BACKUP_DIR"
 [[ -f "$NGINX_CONF" ]] && cp -a "$NGINX_CONF" "$NGINX_BACKUP_DIR/$(basename "$NGINX_CONF").$(date +%Y%m%d%H%M%S)"
 
+# `http2 on;` só existe a partir do NGINX 1.25.1; antes disso é "unknown
+# directive" (Ubuntu 22.04/24.04, Debian 12) e o HTTP/2 vai no `listen`.
+NGINX_VERSION="$(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+SSL_LISTEN_PARAMS="ssl http2"
+HTTP2_DIRECTIVE=""
+if [[ -n "$NGINX_VERSION" ]] && [[ "$(printf '%s\n1.25.1\n' "$NGINX_VERSION" | sort -V | head -1)" == "1.25.1" ]]; then
+    SSL_LISTEN_PARAMS="ssl"
+    HTTP2_DIRECTIVE="    http2 on;"
+fi
+
 LISTEN6_80=""
 LISTEN6_443=""
 if [[ -f /proc/net/if_inet6 ]]; then
     LISTEN6_80="    listen [::]:80;"
-    LISTEN6_443="    listen [::]:443 ssl;"
+    LISTEN6_443="    listen [::]:443 $SSL_LISTEN_PARAMS;"
 fi
 
 cat > "$NGINX_CONF" <<VHOSTEOF
@@ -190,9 +200,9 @@ $LISTEN6_80
 }
 
 server {
-    listen 443 ssl;
+    listen 443 $SSL_LISTEN_PARAMS;
 $LISTEN6_443
-    http2 on;
+$HTTP2_DIRECTIVE
     server_name $DOMAIN;
 
     ssl_certificate     $CERT_PATH;
