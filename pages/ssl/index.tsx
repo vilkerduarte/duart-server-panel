@@ -42,6 +42,18 @@ export default function SslPage() {
 
   useEffect(() => { fetchCerts(); }, []);
 
+  // Preenche com o último email usado (salvo no servidor a cada emissão).
+  useEffect(() => {
+    if (!showForm) return;
+    fetch('/api/settings/config')
+      .then(r => r.json())
+      .then(j => {
+        const last = j.success ? j.data?.sslContactEmail : '';
+        if (last) setFormEmail(prev => prev || last);
+      })
+      .catch(() => {});
+  }, [showForm]);
+
   const handleDelete = async (id: string) => {
     if (!confirm('Remover certificado?')) return;
     try {

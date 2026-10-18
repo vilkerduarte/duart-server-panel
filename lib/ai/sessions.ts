@@ -40,6 +40,11 @@ export interface ChatMessage {
   tool_calls?: ToolCallRecord[];
   tool_call_id?: string;
   name?: string;
+  /**
+   * Raciocínio de modelos em modo thinking (DeepSeek e compatíveis). Quando o
+   * turno chama ferramentas, a API exige que ele volte na próxima requisição.
+   */
+  reasoning_content?: string;
 }
 
 export interface PendingApproval {
@@ -288,7 +293,8 @@ export function sanitizeConversation(messages: ChatMessage[]): ChatMessage[] {
 
       // Chamadas sem resposta invalidam a mensagem inteira. Se ela também trazia
       // texto, o texto é preservado sozinho — o raciocínio do modelo continua
-      // útil como contexto mesmo sem a chamada.
+      // útil como contexto mesmo sem a chamada. O `reasoning_content` fica de
+      // fora: ele só é exigido junto das chamadas que acabaram de ser podadas.
       if (calls.length > 0 && !calls.every(call => answered.has(call.id))) {
         if (hasContent) kept.push({ role: 'assistant', content: message.content });
         continue;

@@ -394,9 +394,18 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         });
       }
 
+      // O raciocínio só é exigido de volta no turno atual (depois da última
+      // mensagem do usuário); nos anteriores é descartado para poupar tokens.
+      const lastUserIndex = trimmed.messages.map(m => m.role).lastIndexOf('user');
+      const apiMessages = trimmed.messages.map((m, i) => {
+        if (i > lastUserIndex || m.reasoning_content === undefined) return m;
+        const { reasoning_content: _omit, ...rest } = m;
+        return rest;
+      });
+
       const stream = await client.chat.completions.create({
         model,
-        messages: [{ role: 'system', content: systemPrompt }, ...trimmed.messages] as any,
+        messages: [{ role: 'system', content: systemPrompt }, ...apiMessages] as any,
         tools: tools.length ? toOpenAiTools(tools) : undefined,
         tool_choice: tools.length ? 'auto' : undefined,
         stream: true,
@@ -408,7 +417,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       });
 
       let assistantText = '';
-      let reasoningSeen = false;
+      let reasoningText = '';
       let finishReason: string | null = null;
       const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
@@ -420,9 +429,10 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         if (!delta) continue;
 
         // Modelos de raciocínio emitem a cadeia de pensamento em campo separado.
-        // Ela não pode voltar para a API no histórico, mas serve para saber que
-        // o modelo respondeu — em vez de tratar o turno como vazio.
-        if (delta.reasoning_content) reasoningSeen = true;
+        // Quando o turno chama ferramentas, a API exige que ela volte na próxima
+        // requisição (erro 400 sem ela). Também serve para saber que o modelo
+        // respondeu, em vez de tratar o turno como vazio.
+        if (delta.reasoning_content) reasoningText += delta.reasoning_content;
 
         if (delta.content) {
           assistantText += delta.content;
@@ -456,6 +466,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       // Um assistente sem `content` e sem `tool_calls` é recusado pela API — e
       // como fica salvo na sessão, envenena toda mensagem seguinte.
       if (!assistantText.trim() && calls.length === 0) {
+        const reasoningSeen = reasoningText.length > 0;
         const kind = finishReason === 'length' ? 'emptyLength'
           : finishReason === 'content_filter' ? 'emptyFiltered'
           : reasoningSeen ? 'emptyReasoning'
@@ -481,6 +492,7 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
         role: 'assistant',
         content: assistantText || null,
         ...(calls.length ? { tool_calls: calls } : {}),
+        ...(calls.length && reasoningText ? { reasoning_content: reasoningText } : {}),
       };
       session.messages.push(assistantMessage);
 

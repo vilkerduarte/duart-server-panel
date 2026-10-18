@@ -29,19 +29,38 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       return res.status(405).json({ success: false, error: 'Método não permitido' });
     }
 
-    const { action, username, password, database, host } = req.body ?? {};
+    const { action, username, password, database, host, createDatabase } = req.body ?? {};
     if (!action) return res.status(400).json({ success: false, error: 'Ação é obrigatória' });
     if (!username) return res.status(400).json({ success: false, error: 'Usuário é obrigatório' });
 
     const user = assertIdentifier(username, 'Nome de usuário');
     const userHost = assertHost(host || 'localhost');
-    const db = database ? assertIdentifier(database, 'Nome do banco') : null;
+    // createDatabase: cria um banco com o mesmo nome do usuário e dá acesso só a ele.
+    const newDb = action === 'create' && createDatabase === true;
+    const db = newDb ? user : database ? assertIdentifier(database, 'Nome do banco') : null;
 
     let result;
 
     switch (action) {
       case 'create': {
         const pass = assertPassword(password);
+
+        if (newDb && type === 'mysql') {
+          result = await mysqlExec(
+            `CREATE DATABASE ${mysqlIdent(user)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
+          );
+          if (result.code !== 0) break;
+        }
+
+        if (newDb && type === 'postgresql') {
+          // Usuário vira dono do banco: no PG 15+ só GRANT no banco não libera o schema public.
+          result = await psqlExec(`CREATE ROLE ${pgIdent(user)} WITH LOGIN PASSWORD ${pgString(pass)};`);
+          if (result.code !== 0) break;
+          result = await psqlExec(`CREATE DATABASE ${pgIdent(user)} OWNER ${pgIdent(user)} ENCODING 'UTF8';`);
+          if (result.code !== 0) await psqlExec(`DROP ROLE IF EXISTS ${pgIdent(user)};`);
+          break;
+        }
+
         if (type === 'mysql') {
           const statements = [
             `CREATE USER ${mysqlString(user)}@${mysqlString(userHost)} IDENTIFIED BY ${mysqlString(pass)};`,
@@ -51,6 +70,13 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
             'FLUSH PRIVILEGES;',
           ];
           result = await mysqlExec(statements.join('\n'));
+          if (result.code !== 0 && newDb) {
+            // Desfaz o que esta chamada criou; o banco era novo, senão o CREATE DATABASE teria falhado.
+            await mysqlExec(
+              `DROP USER IF EXISTS ${mysqlString(user)}@${mysqlString(userHost)};\n` +
+              `DROP DATABASE IF EXISTS ${mysqlIdent(user)};`,
+            );
+          }
         } else if (type === 'postgresql') {
           result = await psqlExec(`CREATE ROLE ${pgIdent(user)} WITH LOGIN PASSWORD ${pgString(pass)};`);
           if (result.code === 0 && db) {
@@ -60,7 +86,9 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           const target = db || 'admin';
           result = await mongoshExec(
             `db.getSiblingDB(${jsString(target)}).createUser({user:${jsString(user)},pwd:${jsString(pass)},` +
-            `roles:[{role:"readWrite",db:${jsString(target)}},{role:"dbAdmin",db:${jsString(target)}}]})`,
+            `roles:[{role:"readWrite",db:${jsString(target)}},{role:"dbAdmin",db:${jsString(target)}}]})` +
+            // Mongo só lista o banco depois que ele tem dados: mesma inicialização da criação de banco.
+            (newDb ? `;db.getSiblingDB(${jsString(target)}).createCollection("_init")` : ''),
           );
         }
         break;

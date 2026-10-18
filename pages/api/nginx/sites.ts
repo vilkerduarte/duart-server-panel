@@ -9,7 +9,7 @@ import {
 import { NginxConfigError, ensureScaffoldSync } from '@/lib/nginx-ops';
 import { issueCertificate, readCertMetadata } from '@/lib/ssl';
 import { registerCertificate, findCertificate } from '@/lib/certificates';
-import { readConfig } from '@/lib/data/config';
+import { readConfig, writeConfig } from '@/lib/data/config';
 
 /**
  * Toda escrita de vhost passa por lib/sites, que aplica as mudanças dentro de
@@ -147,6 +147,9 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
               keyPath: result.keyPath,
               certId: registered.id,
             });
+
+            // Último email usado vira o padrão dos próximos formulários.
+            writeConfig({ sslContactEmail: email });
 
             return res.status(200).json({
               success: true,

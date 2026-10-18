@@ -8,7 +8,7 @@ import {
 } from '@/lib/certificates';
 import { issueCertificate, readCertMetadata } from '@/lib/ssl';
 import { ensureDir } from '@/lib/fsx';
-import { readConfig } from '@/lib/data/config';
+import { readConfig, writeConfig } from '@/lib/data/config';
 
 export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResponse) => {
   try {
@@ -57,6 +57,9 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           method: method === 'dns' ? 'dns' : 'http',
           autoRenew: true,
         });
+
+        // Último email usado vira o padrão dos próximos formulários.
+        if (email) writeConfig({ sslContactEmail: email });
 
         return res.status(200).json({
           success: true,

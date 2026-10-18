@@ -8,6 +8,7 @@ import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import Spinner from '@/components/ui/Spinner';
 import PhpMyAdminCard from './PhpMyAdminCard';
 import MysqlRootPassword from './MysqlRootPassword';
+import { generatePassword } from '@/lib/password';
 import {
   HiOutlinePlus, HiOutlineTrash, HiOutlineKey, HiOutlineCircleStack,
   HiOutlineUser, HiOutlineFolderOpen, HiOutlineArrowUpTray,
@@ -15,6 +16,9 @@ import {
   HiOutlineUsers, HiOutlineExclamationTriangle,
   HiOutlineShieldCheck, HiOutlineCommandLine, HiOutlinePlay,
 } from 'react-icons/hi2';
+
+// Valor do select que pede um banco novo com o mesmo nome do usuário.
+const NEW_DB = '__new__';
 
 interface DbUser {
   user: string;
@@ -320,12 +324,15 @@ export default function DbStatusCard({
           action: 'create',
           username: newUsername,
           password: newUserPassword,
-          database: newUserDb || undefined,
+          database: newUserDb && newUserDb !== NEW_DB ? newUserDb : undefined,
+          createDatabase: newUserDb === NEW_DB,
         }),
       });
       const data = await resp.json();
       if (data.success) {
-        showFeedback(true, `Usuário "${newUsername}" criado`);
+        showFeedback(true, newUserDb === NEW_DB
+          ? `Usuário e banco "${newUsername}" criados`
+          : `Usuário "${newUsername}" criado`);
         setNewUsername('');
         setNewUserPassword('');
         setNewUserDb('');
@@ -698,18 +705,29 @@ export default function DbStatusCard({
                   value={newUsername}
                   onChange={e => setNewUsername(e.target.value)}
                 />
-                <Input
-                  type="password"
-                  placeholder="Senha"
-                  value={newUserPassword}
-                  onChange={e => setNewUserPassword(e.target.value)}
-                />
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <Input
+                      type="text"
+                      placeholder="Senha"
+                      value={newUserPassword}
+                      onChange={e => setNewUserPassword(e.target.value)}
+                      className="w-full font-mono"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={() => setNewUserPassword(generatePassword())}>
+                    <HiOutlineKey className="w-3.5 h-3.5" /> Gerar Senha
+                  </Button>
+                </div>
                 <Select
                   label="Banco de Dados (opcional)"
                   value={newUserDb}
                   onChange={e => setNewUserDb(e.target.value)}
                   options={[
                     { value: '', label: 'Todos os bancos (admin)' },
+                    { value: NEW_DB, label: newUsername ? `(Novo Banco) ${newUsername}` : '(Novo Banco)' },
                     ...databases.map(db => ({ value: db, label: db })),
                   ]}
                 />

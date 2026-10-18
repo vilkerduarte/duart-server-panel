@@ -58,6 +58,18 @@ export default function SslConfigModal({ open, onClose, site, onConfigured }: Ss
   const [keyPath, setKeyPath] = useState('');
   const [chainPath, setChainPath] = useState('');
 
+  // Preenche com o último email usado (salvo no servidor a cada emissão).
+  useEffect(() => {
+    if (!open) return;
+    fetch('/api/settings/config')
+      .then(r => r.json())
+      .then(j => {
+        const last = j.success ? j.data?.sslContactEmail : '';
+        if (last) setEmail(prev => prev || last);
+      })
+      .catch(() => {});
+  }, [open]);
+
   useEffect(() => {
     if (open && method === 'existing') {
       fetchCertificates();
