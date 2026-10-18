@@ -378,6 +378,12 @@ PROXYEOF
 limit_req_zone $binary_remote_addr zone=duart_default:10m rate=30r/s;
 RLEOF
 
+# Incluído pelo vhost do painel; o conteúdo (phpMyAdmin ligado ou desligado) é
+# gerado pelo painel. Precisa existir antes do primeiro `nginx -t`.
+[[ -f /etc/nginx/snippets/duart-phpmyadmin.conf ]] || cat > /etc/nginx/snippets/duart-phpmyadmin.conf <<'PMAEOF'
+# Duart Panel — phpMyAdmin (não instalado). Gerenciado pelo painel.
+PMAEOF
+
 log_ok "Snippets instalados"
 
 # ============================================
@@ -437,6 +443,9 @@ $LISTEN6_80
     error_log  /var/log/nginx/$DOMAIN.error.log;
 
     include snippets/duart-acme.conf;
+
+    # phpMyAdmin (gerenciado pelo painel)
+    include snippets/duart-phpmyadmin.conf;
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;

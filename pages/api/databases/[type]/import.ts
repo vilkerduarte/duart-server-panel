@@ -3,6 +3,7 @@ import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { mysqlClientAuthArgs } from '@/lib/db-credentials';
 
 interface ImportJob {
   id: string;
@@ -46,7 +47,10 @@ function runImportWithPv(job: ImportJob): void {
 
   let dbCmd: string;
   if (type === 'mysql') {
-    dbCmd = `sudo mysql \`${database}\``;
+    // Credencial do painel (option file) quando o root tem senha. O caminho
+    // vem do DATA_DIR, não do request.
+    const auth = mysqlClientAuthArgs().map(arg => `'${arg}'`).join(' ');
+    dbCmd = `sudo mysql ${auth} \`${database}\``;
   } else if (type === 'postgresql') {
     dbCmd = `sudo -u postgres psql "${database}"`;
   } else {
@@ -107,7 +111,7 @@ function runImportDirect(job: ImportJob): void {
 
   if (type === 'mysql') {
     cmd = 'sudo';
-    args = ['mysql', database];
+    args = ['mysql', ...mysqlClientAuthArgs(), database];
   } else if (type === 'postgresql') {
     cmd = 'sudo';
     args = ['-u', 'postgres', 'psql', database];

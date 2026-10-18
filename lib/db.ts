@@ -13,6 +13,7 @@
  */
 
 import { execFileSafe, needsSudo, CommandResult } from './system';
+import { mysqlClientAuthArgs } from './db-credentials';
 
 export type DbType = 'mysql' | 'postgresql' | 'mongodb';
 
@@ -115,9 +116,11 @@ function withSudo(bin: string, args: string[], asUser?: string): { bin: string; 
  */
 export async function mysqlExec(
   sql: string,
-  options: { database?: string; timeout?: number; tabular?: boolean } = {},
+  options: { database?: string; timeout?: number; tabular?: boolean; defaultsFile?: string } = {},
 ): Promise<CommandResult> {
-  const args = ['--batch', '--raw'];
+  // Credencial do painel (quando o root tem senha) entra por option file.
+  const auth = options.defaultsFile ? [`--defaults-extra-file=${options.defaultsFile}`] : mysqlClientAuthArgs();
+  const args = [...auth, '--batch', '--raw'];
   if (!options.tabular) args.push('--skip-column-names');
   if (options.database) args.push(assertIdentifier(options.database, 'nome do banco'));
 

@@ -6,6 +6,8 @@ import Badge from '@/components/ui/Badge';
 import Card from '@/components/ui/Card';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import Spinner from '@/components/ui/Spinner';
+import PhpMyAdminCard from './PhpMyAdminCard';
+import MysqlRootPassword from './MysqlRootPassword';
 import {
   HiOutlinePlus, HiOutlineTrash, HiOutlineKey, HiOutlineCircleStack,
   HiOutlineUser, HiOutlineFolderOpen, HiOutlineArrowUpTray,
@@ -466,6 +468,8 @@ export default function DbStatusCard({
           </div>
         </div>
       </Card>
+
+      {type === 'mysql' && <PhpMyAdminCard />}
 
       {/* Feedback */}
       {feedback && (
@@ -958,7 +962,13 @@ export default function DbStatusCard({
           </div>
         )}
 
-        {activeTab === 'root' && (
+        {activeTab === 'root' && type === 'mysql' && (
+          <div className="p-6">
+            <MysqlRootPassword name={name} onFeedback={showFeedback} />
+          </div>
+        )}
+
+        {activeTab === 'root' && type !== 'mysql' && (
           <div className="p-6">
             <div className="max-w-md space-y-4">
               <div className="flex items-center gap-2 text-[var(--text-primary)]">

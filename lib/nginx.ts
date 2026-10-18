@@ -23,6 +23,7 @@ export const SNIPPET_SSL = `${SNIPPETS_DIR}/duart-ssl.conf`;
 export const SNIPPET_ACME = `${SNIPPETS_DIR}/duart-acme.conf`;
 export const SNIPPET_GZIP = `${SNIPPETS_DIR}/duart-gzip.conf`;
 export const SNIPPET_PROXY = `${SNIPPETS_DIR}/duart-proxy.conf`;
+export const SNIPPET_PHPMYADMIN = `${SNIPPETS_DIR}/duart-phpmyadmin.conf`;
 export const CONF_RATELIMIT = `${CONF_D_DIR}/duart-ratelimit.conf`;
 
 export type SiteType = 'static' | 'php' | 'proxy' | 'python' | 'node';

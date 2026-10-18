@@ -25,6 +25,7 @@ import {
   SNIPPET_ACME,
   SNIPPET_GZIP,
   SNIPPET_PROXY,
+  SNIPPET_PHPMYADMIN,
   CONF_RATELIMIT,
   generateSslSnippet,
   generateAcmeSnippet,
@@ -280,6 +281,13 @@ export function ensureScaffoldSync(): void {
       // Sem permissão de escrita em /etc/nginx: o erro aparece no nginx -t.
     }
   }
+
+  // Incluído pelo vhost do painel; o conteúdo real é de lib/phpmyadmin.ts.
+  try {
+    if (!fs.existsSync(SNIPPET_PHPMYADMIN)) {
+      writeFileAtomic(SNIPPET_PHPMYADMIN, '# Duart Panel — phpMyAdmin (não instalado). Gerenciado pelo painel.\n', 0o644);
+    }
+  } catch {}
 
   try {
     if (!fs.existsSync(CONF_RATELIMIT)) {

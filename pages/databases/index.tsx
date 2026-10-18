@@ -3,6 +3,7 @@ import AppLayout from '@/components/Layout/AppLayout';
 import Button from '@/components/ui/Button';
 import Spinner from '@/components/ui/Spinner';
 import DbStatusCard from '@/components/databases/DbStatusCard';
+import MysqlInstallModal from '@/components/databases/MysqlInstallModal';
 import { HiOutlineServerStack } from 'react-icons/hi2';
 import { SiMysql, SiPostgresql, SiMongodb } from 'react-icons/si';
 
@@ -22,6 +23,7 @@ export default function DatabasesPage() {
   const [selected, setSelected] = useState<string>('mysql');
   const [dbData, setDbData] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
+  const [mysqlInstallOpen, setMysqlInstallOpen] = useState(false);
 
   const fetchDb = (db: string) => {
     setLoading(true);
@@ -39,6 +41,8 @@ export default function DatabasesPage() {
   }, [selected]);
 
   const handleInstall = async (db: string) => {
+    // MySQL tem escolha de versão e phpMyAdmin opcional.
+    if (db === 'mysql') { setMysqlInstallOpen(true); return; }
     if (!confirm(`Instalar ${DB_NAMES[db]}? Pode levar alguns minutos.`)) return;
     await fetch(`/api/databases/${db}/install`, { method: 'POST' });
     fetchDb(db);
@@ -102,6 +106,12 @@ export default function DatabasesPage() {
           />
         )}
       </div>
+
+      <MysqlInstallModal
+        open={mysqlInstallOpen}
+        onClose={() => setMysqlInstallOpen(false)}
+        onInstalled={() => fetchDb('mysql')}
+      />
     </AppLayout>
   );
 }

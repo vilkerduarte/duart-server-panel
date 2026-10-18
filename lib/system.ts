@@ -144,6 +144,25 @@ export const COMMAND_WHITELIST: Record<string, CommandDefinition> = {
     sudo: true,
     timeout: 600000,
   },
+  // Instalação sem prompts do debconf. Sem tty, o debconf cai para um
+  // frontend que lê respostas do stdin e pode travar ou aceitar padrões
+  // inesperados; `env` fixa o frontend sem precisar de shell.
+  apt_install_noninteractive: {
+    bin: 'env',
+    baseArgs: [
+      'DEBIAN_FRONTEND=noninteractive', 'apt-get', 'install', '-y',
+      '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold',
+    ],
+    allowedArgs: [
+      /^-qq$/, /^--no-install-recommends$/,
+      /^mysql-server$/, /^mariadb-server$/, /^phpmyadmin$/,
+      RE_PHP_PKG,
+    ],
+    sudo: true,
+    timeout: 900000,
+  },
+  // As respostas entram por stdin (executeCommandWithInput), nunca por argumento.
+  debconf_set_selections: { bin: 'debconf-set-selections', baseArgs: [], allowedArgs: [], sudo: true, timeout: 15000 },
   apt_remove: { bin: 'apt-get', baseArgs: ['remove', '-y'], allowedArgs: [/^-qq$/, RE_PHP_PKG, RE_PY_PKG], sudo: true, timeout: 300000 },
   apt_update: { bin: 'apt-get', baseArgs: ['update'], allowedArgs: [/^-qq$/], sudo: true, timeout: 120000 },
   dpkg_query_php: { bin: 'dpkg-query', baseArgs: ['-W', '-f=${Package} ${Status}\n'], allowedArgs: [/^php\*$/, /^php\*-fpm$/, /^python3\*$/], sudo: false, timeout: 15000 },
@@ -284,6 +303,20 @@ export function executeCommand(commandKey: string, extraArgs: string[] = []): Pr
     return Promise.reject(err);
   }
   return execFileSafe(resolved.bin, resolved.args, { timeout: resolved.timeout });
+}
+
+/**
+ * Como executeCommand, entregando `input` pelo stdin. É o caminho para dados
+ * que não podem ir na linha de comando (respostas do debconf, por exemplo).
+ */
+export function executeCommandWithInput(commandKey: string, extraArgs: string[], input: string): Promise<CommandResult> {
+  let resolved;
+  try {
+    resolved = buildArgv(commandKey, extraArgs);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  return execFileSafe(resolved.bin, resolved.args, { timeout: resolved.timeout, input });
 }
 
 /** Como executeCommand, mas rejeita quando o comando retorna código diferente de zero. */

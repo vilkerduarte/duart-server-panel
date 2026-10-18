@@ -1,6 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authMiddleware, AuthenticatedRequest } from '@/lib/middleware/auth';
 import { executeCommand, executeRaw } from '@/lib/system';
+import { listDatabases, listUsers } from '@/lib/db';
+import { mysqlServerVersion } from '@/lib/mysql';
 
 const DB_CONFIGS: Record<string, { name: string; pkg: string; port: number; service: string; cli: string; listDbsCmd: string; listUsersCmd: string }> = {
   mysql: {
@@ -48,7 +50,11 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
       let version = '';
 
       try {
-        const statusResult = await executeCommand('systemctl_status', [dbConfig.service]);
+        let statusResult = await executeCommand('systemctl_status', [dbConfig.service]);
+        // MariaDB só responde por `mysql` depois de habilitado (alias do unit).
+        if (type === 'mysql' && statusResult.code === 4) {
+          statusResult = await executeCommand('systemctl_status', ['mariadb']);
+        }
         installed = statusResult.code !== 4;
         running = statusResult.code === 0;
         if (running && statusResult.stdout) {
@@ -59,6 +65,27 @@ export default authMiddleware(async (req: AuthenticatedRequest, res: NextApiResp
           else version = 'running';
         }
       } catch {}
+
+      // MySQL passa pelo cliente com a credencial do painel: depois que o root
+      // ganha senha, o `sudo mysql` puro não entra mais.
+      if (type === 'mysql' && (installed || running)) {
+        const hidden = ['information_schema', 'performance_schema', 'mysql', 'sys'];
+        let databases: string[] = [];
+        let users: { user: string; host: string }[] = [];
+        try {
+          const serverVersion = await mysqlServerVersion();
+          if (serverVersion) {
+            running = true;
+            version = serverVersion;
+            databases = (await listDatabases('mysql')).filter(d => !hidden.includes(d.toLowerCase()));
+            users = await listUsers('mysql');
+          }
+        } catch {}
+        return res.status(200).json({
+          success: true,
+          data: { installed, running, version, port: dbConfig.port, name: dbConfig.name, service: dbConfig.service, databases, users },
+        });
+      }
 
       // List databases
       let databases: string[] = [];

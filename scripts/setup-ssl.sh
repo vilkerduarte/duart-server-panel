@@ -90,6 +90,11 @@ location ^~ /.well-known/acme-challenge/ {
 ACMEEOF
 fi
 
+# O vhost TLS inclui o snippet do phpMyAdmin; instalações anteriores a ele
+# não o têm, e um include de arquivo inexistente derruba o `nginx -t`.
+[[ -f /etc/nginx/snippets/duart-phpmyadmin.conf ]] || \
+    echo "# Duart Panel — phpMyAdmin (não instalado). Gerenciado pelo painel." > /etc/nginx/snippets/duart-phpmyadmin.conf
+
 if [[ -f "$NGINX_CONF" ]] && ! grep -q "duart-acme.conf" "$NGINX_CONF"; then
     log_warn "O vhost não inclui o snippet ACME; a validação pode falhar."
     log_warn "Adicione 'include snippets/duart-acme.conf;' ao bloco da porta 80."
@@ -218,6 +223,9 @@ $HTTP2_DIRECTIVE
     error_log  /var/log/nginx/$DOMAIN.error.log;
 
     include snippets/duart-acme.conf;
+
+    # phpMyAdmin (gerenciado pelo painel)
+    include snippets/duart-phpmyadmin.conf;
 
     location / {
         proxy_pass http://127.0.0.1:$PORT;

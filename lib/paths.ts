@@ -43,6 +43,8 @@ export const DENIED_PREFIXES = [
   '/root/.profile',
   '/var/lib/duart-panel/auth',
   '/var/lib/duart-panel/ai',
+  // Senha root do MySQL guardada pelo painel (lib/db-credentials.ts).
+  '/var/lib/duart-panel/databases',
   '/etc/letsencrypt/archive',
   '/etc/letsencrypt/keys',
   '/proc',

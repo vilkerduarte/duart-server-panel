@@ -207,7 +207,7 @@ export default function AiModal({ open, onClose }: AiModalProps) {
       const res = await fetch('/api/ai/sessions');
       const json = await res.json();
       if (json.success) setSessions(json.data);
-    } catch {}
+    } catch { }
   }, []);
 
   useEffect(() => {
@@ -221,7 +221,7 @@ export default function AiModal({ open, onClose }: AiModalProps) {
 
         // Última aba usada; na falta dela, a padrão da configuração.
         let stored: string | null = null;
-        try { stored = window.localStorage.getItem(MODE_STORAGE_KEY); } catch {}
+        try { stored = window.localStorage.getItem(MODE_STORAGE_KEY); } catch { }
         setMode(prev => (hasConversationRef.current ? prev : normalizeAiMode(stored ?? json?.data?.aiDefaultMode)));
       })
       .catch(() => setFullAccess(false));
@@ -238,7 +238,7 @@ export default function AiModal({ open, onClose }: AiModalProps) {
 
   const changeMode = (next: AiMode) => {
     setMode(next);
-    try { window.localStorage.setItem(MODE_STORAGE_KEY, next); } catch {}
+    try { window.localStorage.setItem(MODE_STORAGE_KEY, next); } catch { }
   };
 
   /**
@@ -445,7 +445,7 @@ export default function AiModal({ open, onClose }: AiModalProps) {
       setPlan(json.data.plan ?? null);
       setSelectedToolId(null);
       setShowSessions(false);
-    } catch {}
+    } catch { }
   };
 
   const attachFiles = async (files: FileList | null) => {
@@ -473,7 +473,7 @@ export default function AiModal({ open, onClose }: AiModalProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-label={t('ai.title')}>
-      <div className="fixed inset-0 bg-[#02050f]/85" onClick={onClose} />
+      <div className="fixed inset-0 bg-[#02050f]/85" onClick={onClose} style={{backdropFilter:'blur(6px)'}}/>
 
       <div className="glow-border relative flex h-[90vh] w-full max-w-6xl animate-fade-in flex-col overflow-hidden rounded-3xl bg-[var(--panel-bg)] shadow-[0_30px_120px_rgba(2,8,30,0.7)]">
         {/* Brilho decorativo no canto, como nas referências */}
@@ -514,11 +514,10 @@ export default function AiModal({ open, onClose }: AiModalProps) {
                   aria-selected={active}
                   onClick={() => changeMode(value)}
                   title={t(`ai.hints.${value}`)}
-                  className={`flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 py-2 text-sm font-medium transition-all ${
-                    active
+                  className={`flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 py-2 text-sm font-medium transition-all ${active
                       ? 'bg-blue-500/15 text-[var(--text-primary)] shadow-[0_0_0_1px_rgba(96,165,250,0.7),0_0_18px_rgba(59,130,246,0.35)]'
                       : 'text-[var(--text-muted)] hover:bg-white/5 hover:text-[var(--text-primary)]'
-                  }`}
+                    }`}
                 >
                   <Icon className="h-4 w-4" />
                   {t(`ai.tabs.${value}`)}
@@ -540,9 +539,8 @@ export default function AiModal({ open, onClose }: AiModalProps) {
                 <button
                   key={session.id}
                   onClick={() => openSession(session.id)}
-                  className={`w-full border-b border-[var(--glass-border)] px-3 py-2.5 text-left transition-colors last:border-0 hover:bg-white/5 ${
-                    session.id === sessionId ? 'bg-white/5' : ''
-                  }`}
+                  className={`w-full border-b border-[var(--glass-border)] px-3 py-2.5 text-left transition-colors last:border-0 hover:bg-white/5 ${session.id === sessionId ? 'bg-white/5' : ''
+                    }`}
                 >
                   <p className="m-0 truncate text-xs font-medium text-[var(--text-primary)]">{session.title}</p>
                   <p className="m-0 mt-0.5 text-[10px] text-[var(--text-muted)]">
@@ -611,11 +609,10 @@ export default function AiModal({ open, onClose }: AiModalProps) {
             </div>
           )}
 
-          <div className={`flex items-end gap-2 rounded-2xl border bg-black/25 p-2 transition-shadow ${
-            streaming
+          <div className={`flex items-end gap-2 rounded-2xl border bg-black/25 p-2 transition-shadow ${streaming
               ? 'border-blue-400/60 shadow-[0_0_20px_rgba(59,130,246,0.3)]'
               : 'border-[var(--glass-border)] focus-within:border-blue-400/70 focus-within:shadow-[0_0_20px_rgba(59,130,246,0.25)]'
-          }`}>
+            }`}>
             <input
               ref={fileInputRef}
               type="file"
@@ -689,9 +686,8 @@ function IconButton({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className={`rounded-full p-2 transition-colors hover:bg-white/10 hover:text-[var(--text-primary)] ${
-        active ? 'bg-white/10 text-[var(--text-primary)]' : 'text-[var(--text-muted)]'
-      }`}
+      className={`rounded-full p-2 transition-colors hover:bg-white/10 hover:text-[var(--text-primary)] ${active ? 'bg-white/10 text-[var(--text-primary)]' : 'text-[var(--text-muted)]'
+        }`}
     >
       {children}
     </button>
@@ -846,9 +842,8 @@ function TimelinePanel({
               <li key={tool.id} className="m-0">
                 <button
                   onClick={() => onSelect(tool.id)}
-                  className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5 ${
-                    tool.id === selectedId ? 'bg-blue-500/10 ring-1 ring-blue-400/30' : ''
-                  }`}
+                  className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-white/5 ${tool.id === selectedId ? 'bg-blue-500/10 ring-1 ring-blue-400/30' : ''
+                    }`}
                 >
                   <StatusIcon status={tool.status} className="mt-0.5 h-4 w-4" />
                   <span className="min-w-0 flex-1">
@@ -883,7 +878,7 @@ function OutputPanel({ tool }: { tool?: ToolEntry }) {
       await navigator.clipboard.writeText(tool.output ?? '');
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {}
+    } catch { }
   };
 
   return (
@@ -980,9 +975,8 @@ function EntryView({
   const irreversible = entry.pending.some(p => p.risk === 'irreversible');
 
   return (
-    <div className={`ml-10 flex flex-col gap-3 rounded-2xl border p-4 ${
-      irreversible ? 'border-red-500/40 bg-red-500/5' : 'border-amber-500/40 bg-amber-500/5'
-    }`}>
+    <div className={`ml-10 flex flex-col gap-3 rounded-2xl border p-4 ${irreversible ? 'border-red-500/40 bg-red-500/5' : 'border-amber-500/40 bg-amber-500/5'
+      }`}>
       <p className="m-0 flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)]">
         <HiOutlineExclamationTriangle className={`h-5 w-5 ${irreversible ? 'text-red-400' : 'text-amber-400'}`} />
         {irreversible ? t('ai.irreversibleTitle') : t('ai.approvalTitle')}
@@ -997,13 +991,13 @@ function EntryView({
           <pre className="m-0 max-h-64 overflow-auto rounded-xl bg-black/30 p-3 font-mono text-[11px] leading-tight">
             {pending.previewType === 'diff'
               ? pending.preview.split('\n').map((line, i) => (
-                  <div key={i} className={
-                    line.startsWith('+') && !line.startsWith('+++') ? 'text-emerald-400'
-                      : line.startsWith('-') && !line.startsWith('---') ? 'text-red-400'
+                <div key={i} className={
+                  line.startsWith('+') && !line.startsWith('+++') ? 'text-emerald-400'
+                    : line.startsWith('-') && !line.startsWith('---') ? 'text-red-400'
                       : line.startsWith('@@') ? 'text-blue-400'
-                      : 'text-[var(--text-secondary)]'
-                  }>{line || ' '}</div>
-                ))
+                        : 'text-[var(--text-secondary)]'
+                }>{line || ' '}</div>
+              ))
               : <span className="whitespace-pre-wrap text-[var(--text-secondary)]">{pending.preview}</span>}
           </pre>
         </div>
